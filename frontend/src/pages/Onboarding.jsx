@@ -57,6 +57,7 @@ const COMMON_CURRENCIES = [
   { code: "MXN", label: "MXN — Mexican Peso" },
   { code: "BRL", label: "BRL — Brazilian Real" },
   { code: "INR", label: "INR — Indian Rupee" },
+  { code: "LKR", label: "LKR — Sri Lankan Rupee" },
 ];
 
 // Common BCP-47 locale options.
@@ -66,6 +67,7 @@ const COMMON_LOCALES = [
   { code: "en-GB", label: "English (United Kingdom)" },
   { code: "en-AU", label: "English (Australia)" },
   { code: "en-NZ", label: "English (New Zealand)" },
+  { code: "en-LK", label: "English (Sri Lanka)" },
   { code: "fr-CA", label: "French (Canada)" },
   { code: "fr-FR", label: "French (France)" },
   { code: "de-DE", label: "German (Germany)" },
