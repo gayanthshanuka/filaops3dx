@@ -21,12 +21,16 @@ def _uniq(prefix):
     return f"{prefix}-{uuid.uuid4().hex[:10]}"
 
 
+def _phone():
+    return "0" + str(uuid.uuid4().int)[:9]
+
+
 class TestFindOrCreateCustomer:
     def test_uses_canonical_customer_number_format(self, db):
         """New import customers get the canonical CUST-NNN number (regex
         generator), not the old two-hyphen CUST-YYYY-NNNNNN format."""
         email = f"{_uniq('importcust')}@example.com"
-        cust = find_or_create_customer(db, email, name="Jane Doe")
+        cust = find_or_create_customer(db, email, name="Jane Doe", shipping_address={"phone": _phone()})
         db.flush()
         assert cust is not None
         assert re.match(r"^CUST-\d+$", cust.customer_number or ""), cust.customer_number
@@ -36,8 +40,8 @@ class TestImportOrdersCorrectness:
     def _csv(self, *, src_id, sku, qty="2", price="10.00", email=None):
         email = email or f"{_uniq('buyer')}@example.com"
         return (
-            "Order ID,Email,SKU,Quantity,Unit Price\n"
-            f"{src_id},{email},{sku},{qty},{price}\n"
+            "Order ID,Email,Phone,SKU,Quantity,Unit Price\n"
+            f"{src_id},{email},{_phone()},{sku},{qty},{price}\n"
         )
 
     def test_generates_canonical_so_number(self, db, make_product):
@@ -89,8 +93,8 @@ class TestImportOrdersCorrectness:
         def _import_no_order_id():
             email = f"{_uniq('buyer')}@example.com"
             csv_text = (
-                "Email,SKU,Quantity,Unit Price\n"
-                f"{email},{sku},1,10.00\n"
+                "Email,Phone,SKU,Quantity,Unit Price\n"
+                f"{email},{_phone()},{sku},1,10.00\n"
             )
             res = import_orders_from_csv(db, csv_text, current_user_id=1)
             return res, email
@@ -171,8 +175,8 @@ class TestImportOrdersCorrectness:
         make_product(sku=sku, name="Imported Widget")
         name_val = f"#{_uniq('SHOP')}"
         csv_text = (
-            "Name,Email,SKU,Quantity,Unit Price\n"
-            f"{name_val},{_uniq('buyer')}@example.com,{sku},1,10.00\n"
+            "Name,Email,Phone,SKU,Quantity,Unit Price\n"
+            f"{name_val},{_uniq('buyer')}@example.com,{_phone()},{sku},1,10.00\n"
         )
         res = import_orders_from_csv(db, csv_text, source="shopify", current_user_id=1)
         assert res["created"] == 1, res
@@ -189,8 +193,8 @@ class TestImportOrdersCorrectness:
         name_val = f"#{_uniq('NOTSHOP')}"
         email = f"{_uniq('buyer')}@example.com"
         csv_text = (
-            "Name,Email,SKU,Quantity,Unit Price\n"
-            f"{name_val},{email},{sku},1,10.00\n"
+            "Name,Email,Phone,SKU,Quantity,Unit Price\n"
+            f"{name_val},{email},{_phone()},{sku},1,10.00\n"
         )
         res = import_orders_from_csv(db, csv_text, source="manual", current_user_id=1)
         assert res["created"] == 1, res

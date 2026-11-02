@@ -66,7 +66,10 @@ export default function AdminCustomers() {
   const filteredCustomers = customers.filter((customer) => {
     if (!filters.search) return true;
     const search = filters.search.toLowerCase();
+    const phoneSearch = /^[+0-9\s().-]+$/.test(search) ? search.replace(/[^0-9]/g, "") : "";
     return (
+      customer.phone?.toLowerCase().includes(search) ||
+      (phoneSearch && customer.phone?.replace(/[^0-9]/g, "").includes(phoneSearch)) ||
       customer.email?.toLowerCase().includes(search) ||
       customer.customer_number?.toLowerCase().includes(search) ||
       customer.full_name?.toLowerCase().includes(search) ||
@@ -211,7 +214,7 @@ export default function AdminCustomers() {
         <div className="flex-1">
           <input
             type="text"
-            placeholder="Search by email, name, company, or customer #..."
+            placeholder="Search by telephone, name, company, email, or customer #..."
             value={filters.search}
             onChange={(e) => setFilters({ ...filters, search: e.target.value })}
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white placeholder-gray-500"
@@ -259,7 +262,7 @@ export default function AdminCustomers() {
                   Name
                 </th>
                 <th className="text-left py-3 px-4 text-xs font-medium text-gray-400 uppercase">
-                  Email
+                  Telephone
                 </th>
                 <th className="text-left py-3 px-4 text-xs font-medium text-gray-400 uppercase">
                   Company
@@ -299,7 +302,7 @@ export default function AdminCustomers() {
                   <td className="py-3 px-4 text-gray-300">
                     {customer.full_name || "-"}
                   </td>
-                  <td className="py-3 px-4 text-gray-300">{customer.email}</td>
+                  <td className="py-3 px-4 text-gray-300">{customer.phone || "-"}</td>
                   <td className="py-3 px-4 text-gray-400">
                     {customer.company_name || "-"}
                   </td>

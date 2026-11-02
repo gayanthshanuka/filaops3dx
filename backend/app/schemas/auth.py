@@ -6,6 +6,7 @@ Request and response models for user registration, login, and token management
 from typing import Optional
 from datetime import datetime
 from pydantic import BaseModel, EmailStr, Field, field_validator
+from app.core.customer_contact import normalize_phone
 
 
 class UserRegister(BaseModel):
@@ -16,6 +17,11 @@ class UserRegister(BaseModel):
     last_name: Optional[str] = Field(None, max_length=100)
     company_name: Optional[str] = Field(None, max_length=200)
     phone: Optional[str] = Field(None, max_length=20)
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def validate_optional_phone(cls, value):
+        return normalize_phone(value) if value else None
 
     @field_validator('password')
     @classmethod
@@ -43,7 +49,7 @@ class UserResponse(BaseModel):
     """Schema for user data response"""
     id: int
     customer_number: Optional[str] = None
-    email: str
+    email: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     company_name: Optional[str] = None

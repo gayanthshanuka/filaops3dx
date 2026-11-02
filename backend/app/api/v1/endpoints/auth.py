@@ -33,6 +33,7 @@ import secrets
 from app.core.config import settings
 from app.schemas.common import MessageResponse
 from app.services.email_service import email_service
+from app.services.customer_contact import ensure_contact_available, commit_customer
 from app.core.security import (
     hash_password,
     verify_password,
@@ -77,13 +78,7 @@ async def register_user(
     In cookie mode, tokens are set as httpOnly cookies.
     In header mode, tokens are returned in the response body.
     """
-    # Check if email already exists
-    existing_user = db.query(User).filter(User.email == user_data.email).first()
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered"
-        )
+    ensure_contact_available(db, phone=user_data.phone, email=user_data.email)
 
     # Hash password
     password_hashed = hash_password(user_data.password)
@@ -102,7 +97,7 @@ async def register_user(
     )
 
     db.add(new_user)
-    db.commit()
+    commit_customer(db)
     db.refresh(new_user)
 
     # Generate tokens for immediate login
@@ -303,12 +298,7 @@ async def register_portal_customer(
         is impossible at this layer).
       - Cookie / bearer token behavior is the same: respects AUTH_MODE.
     """
-    existing_user = db.query(User).filter(User.email == user_data.email).first()
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered",
-        )
+    ensure_contact_available(db, phone=user_data.phone, email=user_data.email)
 
     password_hashed = hash_password(user_data.password)
     new_user = User(
@@ -323,7 +313,7 @@ async def register_portal_customer(
         email_verified=False,
     )
     db.add(new_user)
-    db.commit()
+    commit_customer(db)
     db.refresh(new_user)
 
     access_token = create_access_token(new_user.id)  # type: ignore[arg-type]

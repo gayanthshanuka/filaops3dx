@@ -20,6 +20,8 @@ Covers:
 - import_customers: CSV import with savepoint handling
 """
 import uuid
+import csv
+import io
 
 import pytest
 from decimal import Decimal
@@ -36,6 +38,24 @@ from app.services import customer_service
 
 def _uid() -> str:
     return uuid.uuid4().hex[:8]
+
+
+def _phone():
+    return f"07{uuid.uuid4().int % 1000000000000:012d}"
+
+
+def _csv_with_phones(content):
+    """Give existing email-validation fixtures otherwise valid contact data."""
+    rows = list(csv.DictReader(io.StringIO(content)))
+    if not rows:
+        return content
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=[*rows[0], "phone"])
+    writer.writeheader()
+    for row in rows:
+        row["phone"] = _phone() if row.get("email") or row.get("billing_email") else ""
+        writer.writerow(row)
+    return output.getvalue()
 
 
 def _make_user_customer(db, *, email=None, first_name=None, last_name=None,
@@ -153,6 +173,7 @@ class TestCreateCustomer:
     def test_create_basic_customer(self, db):
         uid = _uid()
         data = CustomerCreate(
+            phone=_phone(),
             email=f"new-{uid}@example.com",
             first_name="Alice",
             last_name="Smith",
@@ -170,6 +191,7 @@ class TestCreateCustomer:
     def test_create_with_full_address(self, db):
         uid = _uid()
         data = CustomerCreate(
+            phone=_phone(),
             email=f"addr-{uid}@example.com",
             first_name="Bob",
             billing_address_line1="123 Main St",
@@ -191,10 +213,10 @@ class TestCreateCustomer:
     def test_create_duplicate_email_raises_400(self, db):
         uid = _uid()
         email = f"dup-{uid}@example.com"
-        data = CustomerCreate(email=email, first_name="First")
+        data = CustomerCreate(phone=_phone(), email=email, first_name="First")
         customer_service.create_customer(db, data, admin_id=1)
 
-        data2 = CustomerCreate(email=email, first_name="Second")
+        data2 = CustomerCreate(phone=_phone(), email=email, first_name="Second")
         with pytest.raises(HTTPException) as exc_info:
             customer_service.create_customer(db, data2, admin_id=1)
         assert exc_info.value.status_code == 400
@@ -202,7 +224,7 @@ class TestCreateCustomer:
 
     def test_create_defaults_to_active(self, db):
         uid = _uid()
-        data = CustomerCreate(email=f"active-{uid}@example.com")
+        data = CustomerCreate(phone=_phone(), email=f"active-{uid}@example.com")
         result = customer_service.create_customer(db, data, admin_id=1)
         assert result["status"] == "active"
 
@@ -646,27 +668,27 @@ class TestPreviewCustomerImport:
 
     def test_valid_csv(self, db):
         csv_text = "email,first_name,last_name\njohn@example.com,John,Doe\njane@example.com,Jane,Smith\n"
-        result = customer_service.preview_customer_import(db, csv_text)
+        result = customer_service.preview_customer_import(db, _csv_with_phones(csv_text))
 
         assert result["total_rows"] == 2
         assert result["valid_rows"] == 2
         assert result["error_rows"] == 0
         assert result["truncated"] is False
 
-    def test_missing_email(self, db):
+    def test_missing_phone(self, db):
         csv_text = "email,first_name\n,John\njane@example.com,Jane\n"
-        result = customer_service.preview_customer_import(db, csv_text)
+        result = customer_service.preview_customer_import(db, _csv_with_phones(csv_text))
 
         assert result["total_rows"] == 2
         assert result["error_rows"] >= 1
-        # The row without email should have an error
+        # The row without a telephone number should have an error
         first_row = result["rows"][0]
         assert first_row["valid"] is False
         assert any("required" in e.lower() for e in first_row["errors"])
 
     def test_invalid_email(self, db):
         csv_text = "email,first_name\nbademail,John\n"
-        result = customer_service.preview_customer_import(db, csv_text)
+        result = customer_service.preview_customer_import(db, _csv_with_phones(csv_text))
 
         assert result["error_rows"] >= 1
         row = result["rows"][0]
@@ -675,7 +697,7 @@ class TestPreviewCustomerImport:
 
     def test_duplicate_email_in_csv(self, db):
         csv_text = "email,first_name\ndup@example.com,First\ndup@example.com,Second\n"
-        result = customer_service.preview_customer_import(db, csv_text)
+        result = customer_service.preview_customer_import(db, _csv_with_phones(csv_text))
 
         # First row valid, second row should be flagged as duplicate
         assert result["rows"][0]["valid"] is True
@@ -688,14 +710,14 @@ class TestPreviewCustomerImport:
         _make_user_customer(db, email=email)
 
         csv_text = f"email,first_name\n{email},Existing\n"
-        result = customer_service.preview_customer_import(db, csv_text)
+        result = customer_service.preview_customer_import(db, _csv_with_phones(csv_text))
 
         assert result["error_rows"] >= 1
         assert any("already exists" in e.lower() for e in result["rows"][0]["errors"])
 
     def test_detected_format(self, db):
         csv_text = "billing_first_name,billing_last_name,billing_email\nJohn,Doe,john@shop.com\n"
-        result = customer_service.preview_customer_import(db, csv_text)
+        result = customer_service.preview_customer_import(db, _csv_with_phones(csv_text))
         assert result["detected_format"] == "WooCommerce"
 
     def test_truncated_flag(self, db):
@@ -703,7 +725,7 @@ class TestPreviewCustomerImport:
         csv_text = "email,first_name\n" + "".join(
             f"user{i}@example.com,User{i}\n" for i in range(5)
         )
-        result = customer_service.preview_customer_import(db, csv_text)
+        result = customer_service.preview_customer_import(db, _csv_with_phones(csv_text))
         assert result["truncated"] is False
 
 
@@ -718,7 +740,7 @@ class TestImportCustomers:
     def test_basic_import(self, db):
         uid = _uid()
         csv_text = f"email,first_name,last_name\nimport-{uid}@example.com,Import,Test\n"
-        result = customer_service.import_customers(db, csv_text, admin_id=1)
+        result = customer_service.import_customers(db, _csv_with_phones(csv_text), admin_id=1)
 
         assert result["imported"] == 1
         assert result["skipped"] == 0
@@ -733,7 +755,7 @@ class TestImportCustomers:
 
     def test_import_skips_invalid_email(self, db):
         csv_text = "email,first_name\nbademail,BadGuy\n"
-        result = customer_service.import_customers(db, csv_text, admin_id=1)
+        result = customer_service.import_customers(db, _csv_with_phones(csv_text), admin_id=1)
 
         assert result["imported"] == 0
         assert result["skipped"] == 1
@@ -745,7 +767,7 @@ class TestImportCustomers:
         _make_user_customer(db, email=email)
 
         csv_text = f"email,first_name\n{email},Existing\n"
-        result = customer_service.import_customers(db, csv_text, admin_id=1)
+        result = customer_service.import_customers(db, _csv_with_phones(csv_text), admin_id=1)
 
         assert result["imported"] == 0
         assert result["skipped"] == 1
@@ -758,7 +780,7 @@ class TestImportCustomers:
             f"multi2-{uid}@example.com,Bob,Two\n"
             f"multi3-{uid}@example.com,Carol,Three\n"
         )
-        result = customer_service.import_customers(db, csv_text, admin_id=1)
+        result = customer_service.import_customers(db, _csv_with_phones(csv_text), admin_id=1)
 
         assert result["imported"] == 3
         assert result["skipped"] == 0
@@ -771,21 +793,21 @@ class TestImportCustomers:
             "noemail,Bad\n"
             f"also-good-{uid}@example.com,AlsoGood\n"
         )
-        result = customer_service.import_customers(db, csv_text, admin_id=1)
+        result = customer_service.import_customers(db, _csv_with_phones(csv_text), admin_id=1)
 
         assert result["imported"] == 2
         assert result["skipped"] == 1
 
     def test_import_message_with_errors(self, db):
         csv_text = "email,first_name\nbademail,Bad\n"
-        result = customer_service.import_customers(db, csv_text, admin_id=1)
+        result = customer_service.import_customers(db, _csv_with_phones(csv_text), admin_id=1)
 
         assert "skipped" in result["message"].lower()
 
     def test_import_assigns_customer_number(self, db):
         uid = _uid()
         csv_text = f"email,first_name\nimportnum-{uid}@example.com,NumCheck\n"
-        customer_service.import_customers(db, csv_text, admin_id=1)
+        customer_service.import_customers(db, _csv_with_phones(csv_text), admin_id=1)
 
         user = db.query(User).filter(User.email == f"importnum-{uid}@example.com").first()
         assert user is not None
@@ -798,7 +820,7 @@ class TestImportCustomers:
             "billing_email,billing_first_name,billing_last_name,billing_company\n"
             f"woo-{uid}@shop.com,Woo,Customer,WooShop\n"
         )
-        result = customer_service.import_customers(db, csv_text, admin_id=1)
+        result = customer_service.import_customers(db, _csv_with_phones(csv_text), admin_id=1)
         assert result["imported"] == 1
 
         user = db.query(User).filter(User.email == f"woo-{uid}@shop.com").first()
