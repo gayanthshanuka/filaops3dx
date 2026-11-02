@@ -21,6 +21,7 @@ export const currencyOptions = [
   { value: "MXN", label: "MXN \u2014 Mexican Peso (MX$)" },
   { value: "INR", label: "INR \u2014 Indian Rupee (\u20b9)" },
   { value: "NPR", label: "NPR \u2014 Nepalese Rupee (Rs)" },
+  { value: "LKR", label: "LKR \u2014 Sri Lankan Rupee (Rs)" },
   { value: "JPY", label: "JPY \u2014 Japanese Yen (\u00a5)" },
   { value: "CNY", label: "CNY \u2014 Chinese Yuan (\u00a5)" },
   { value: "KRW", label: "KRW \u2014 South Korean Won (\u20a9)" },
@@ -54,4 +55,5 @@ export const localeOptions = [
   { value: "hi-IN", label: "\u0939\u093f\u0928\u094d\u0926\u0940 \u2014 1,234.56" },
   { value: "ne-NP", label: "\u0928\u0947\u092a\u093e\u0932\u0940 (Nepal) \u2014 1,234.56" },
   { value: "en-NP", label: "English (Nepal) \u2014 1,234.56" },
+  { value: "en-LK", label: "English (Sri Lanka) \u2014 1,234.56" },
 ];

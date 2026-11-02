@@ -2,8 +2,13 @@ import { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { API_URL } from "../../config/api";
 import logoFull from "../../assets/logo_full.png";
-import logoBLB3D from "../../assets/logo_blb3d.svg";
 
+/**
+ * Sign-in screen, and the app's landing route — "/" redirects here.
+ *
+ * Also the first place a backend outage becomes visible, so it surfaces
+ * connection failures inline as an amber warning rather than failing silently.
+ */
 export default function AdminLogin() {
   const navigate = useNavigate();
   const [formData, setFormData] = useState({
@@ -45,6 +50,12 @@ export default function AdminLogin() {
 
     checkSetupStatus();
   }, [navigate]);
+
+  // The shop's own logo; GET /settings/company/logo needs no login. The
+  // <img> loads it once and stays hidden until it has loaded, so a shop
+  // without a logo (404) shows only the FilaOps logo and no broken image.
+  const [companyLogoLoaded, setCompanyLogoLoaded] = useState(false);
+  const [companyLogoFailed, setCompanyLogoFailed] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -121,20 +132,28 @@ export default function AdminLogin() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4 grid-pattern" style={{ backgroundColor: 'var(--bg-primary)' }}>
+    // data-theme="dim" declares what this screen already is: a dark surface.
+    // It still paints from the deprecated Neo tokens, so any Workbench token
+    // used here — currently just --status-amber on the connection banner —
+    // must resolve to its dark value or it lands unreadable on this ground.
+    // Removed when the shell slice migrates this screen off the Neo palette.
+    <div data-theme="dim" className="min-h-screen flex items-center justify-center px-4 grid-pattern" style={{ backgroundColor: 'var(--bg-primary)' }}>
       <div className="w-full max-w-md">
-        {/* Dual Logos - BLB3D + FilaOps */}
+        {/* The shop's own logo (when uploaded) above the FilaOps logo */}
         <div className="text-center mb-8">
           <Link to="/" className="inline-block">
             <div className="flex flex-col items-center gap-4">
-              {/* BLB3D Logo with breathing glow */}
-              <div className="logo-container">
-                <img
-                  src={logoBLB3D}
-                  alt="BLB3D"
-                  className="h-16 w-auto logo-breathe"
-                />
-              </div>
+              {!companyLogoFailed && (
+                <div className="logo-container" hidden={!companyLogoLoaded}>
+                  <img
+                    src={`${API_URL}/api/v1/settings/company/logo`}
+                    alt="Company Logo"
+                    className="h-16 w-auto logo-breathe"
+                    onLoad={() => setCompanyLogoLoaded(true)}
+                    onError={() => setCompanyLogoFailed(true)}
+                  />
+                </div>
+              )}
               {/* FilaOps Logo */}
               <img
                 src={logoFull}
@@ -157,7 +176,7 @@ export default function AdminLogin() {
                 fill="none"
                 stroke="currentColor"
                 viewBox="0 0 24 24"
-                style={{ color: 'var(--accent)' }}
+                style={{ color: 'var(--status-amber)' }}
               >
                 <path
                   strokeLinecap="round"
@@ -167,7 +186,7 @@ export default function AdminLogin() {
                 />
               </svg>
               <div>
-                <h3 className="font-medium" style={{ color: 'var(--accent)' }}>
+                <h3 className="font-medium" style={{ color: 'var(--status-amber)' }}>
                   Connection Issue
                 </h3>
                 <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>{apiError}</p>

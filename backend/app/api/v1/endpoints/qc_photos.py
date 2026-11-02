@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
-from app.api.v1.endpoints.auth import get_current_user
+from app.api.v1.deps import get_current_staff_user
 from app.core.paths import resolve_upload_qc_photos_dir
 from app.core.settings import settings
 from app.db.session import get_db
@@ -30,7 +30,9 @@ from app.models.user import User
 from app.schemas.quality import QCPhotoResponse, QCPhotoUpdate
 from app.services.quality_policy import get_quality_policy
 
-router = APIRouter()
+# SEC-409: every route here is staff-only (admin or operator). A plain login is
+# not enough, because anyone can self-register a customer account.
+router = APIRouter(dependencies=[Depends(get_current_staff_user)])
 logger = get_logger(__name__)
 
 # Dedicated upload directory (NOT shared with po_documents). Resolved at import;
@@ -45,6 +47,19 @@ MAX_PHOTO_BYTES = 25 * 1024 * 1024  # 25 MB
 
 def _ensure_upload_dir() -> None:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _resolve_local_path(file_name: str) -> str:
+    """Resolve a photo path and require it to remain inside ``UPLOAD_DIR``."""
+    upload_root = os.path.realpath(UPLOAD_DIR)
+    local_path = os.path.realpath(os.path.join(upload_root, file_name))
+    try:
+        is_within_upload_root = os.path.commonpath((upload_root, local_path)) == upload_root
+    except ValueError:
+        is_within_upload_root = False
+    if not is_within_upload_root:
+        raise HTTPException(status_code=400, detail="Invalid photo path")
+    return local_path
 
 
 def _safe_filename(original: str, inspection_id: int) -> str:
@@ -113,7 +128,7 @@ async def upload_photo(
     inspection_id: int,
     file: UploadFile = File(...),
     caption: Optional[str] = Form(None),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_staff_user),
     db: Session = Depends(get_db),
 ):
     """Attach a photo to a QC inspection. Images only, max 25 MB."""
@@ -152,7 +167,7 @@ async def upload_photo(
     )
     safe_name = _safe_filename(original, inspection_id)
     _ensure_upload_dir()
-    local_path = os.path.join(UPLOAD_DIR, safe_name)
+    local_path = _resolve_local_path(safe_name)
     # Write the blob and the row together: if the commit fails, remove the file
     # we just wrote so it can't orphan under uploads/qc_photos.
     try:
@@ -188,7 +203,7 @@ async def upload_photo(
 def list_photos(
     inspection_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_staff_user),
 ):
     """List photos for a QC inspection, newest first."""
     _require_quality_enabled(db)
@@ -207,7 +222,7 @@ def download_photo(
     inspection_id: int,
     photo_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_staff_user),
 ):
     """Stream the image bytes for a QC photo."""
     _require_quality_enabled(db)
@@ -226,7 +241,7 @@ def update_photo(
     inspection_id: int,
     photo_id: int,
     body: QCPhotoUpdate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_staff_user),
     db: Session = Depends(get_db),
 ):
     """Update a photo's caption."""
@@ -243,7 +258,7 @@ def update_photo(
 def delete_photo(
     inspection_id: int,
     photo_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_staff_user),
     db: Session = Depends(get_db),
 ):
     """Delete a QC photo (DB row + local file)."""

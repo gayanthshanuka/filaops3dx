@@ -3,10 +3,9 @@ Production Order Service — CRUD, status management, scheduling, and operations
 
 Extracted from production_orders.py (ARCHITECT-003).
 """
-import math
 from datetime import datetime, timezone, date
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import HTTPException
 from sqlalchemy import Integer, cast, func, desc, or_, case
@@ -26,6 +25,10 @@ from app.models.manufacturing import OperationType, Routing, RoutingOperation, R
 from app.models.production_order import ProductionOrderOperationMaterial, ScrapRecord, QCInspection
 from app.models.work_center import WorkCenter
 from app.models.material_spool import MaterialSpool, ProductionOrderSpool
+from app.services.production_order_quantity_change import (
+    require_storable_order_quantity,
+    required_quantity_for_routing_material,
+)
 from app.services.supply_netting import get_projected_available
 logger = get_logger(__name__)
 
@@ -98,17 +101,13 @@ def copy_routing_to_operations(
             if rom.is_cost_only:
                 continue
 
-            qty_required = rom.calculate_required_quantity(int(order.quantity_ordered))
-
-            unit_upper = (rom.unit or "").upper()
-            if unit_upper in ("EA", "EACH", "PCS", "UNIT", "BOX", "BOXES"):
-                qty_required = math.ceil(qty_required)
-
             mat = ProductionOrderOperationMaterial(
                 production_order_operation_id=op.id,
                 component_id=rom.component_id,
                 routing_operation_material_id=rom.id,
-                quantity_required=Decimal(str(qty_required)),
+                quantity_required=required_quantity_for_routing_material(
+                    rom, order.quantity_ordered
+                ),
                 unit=rom.unit,
                 quantity_allocated=Decimal("0"),
                 quantity_consumed=Decimal("0"),
@@ -193,7 +192,7 @@ def create_production_order(
     db: Session,
     *,
     product_id: int,
-    quantity_ordered: int,
+    quantity_ordered: Union[int, Decimal],
     created_by: str,
     bom_id: Optional[int] = None,
     routing_id: Optional[int] = None,
@@ -207,6 +206,11 @@ def create_production_order(
 ) -> ProductionOrder:
     """Create a new production order."""
     from app.services.inventory_service import reserve_production_materials
+
+    # Refused before anything is created: the column keeps four decimal places,
+    # so a longer quantity would be stored rounded (0.00001 -> 0) while the
+    # routing copy sized and reserved its materials from the longer figure.
+    require_storable_order_quantity(quantity_ordered, "Quantity")
 
     product = db.query(Product).filter(Product.id == product_id).first()
     if not product:
@@ -507,7 +511,7 @@ def get_schedule_summary(db: Session) -> dict:
             ProductionOrder.status,
             func.count(ProductionOrder.id).label("count")
         )
-        .filter(ProductionOrder.status.notin_(["complete", "cancelled"]))
+        .filter(ProductionOrder.status.notin_(["complete", "cancelled", "scrapped"]))
         .group_by(ProductionOrder.status)
         .all()
     )
@@ -517,12 +521,12 @@ def get_schedule_summary(db: Session) -> dict:
     # Count due today/overdue
     today = date.today()
     due_today = db.query(ProductionOrder).filter(
-        ProductionOrder.status.notin_(["complete", "cancelled"]),
+        ProductionOrder.status.notin_(["complete", "cancelled", "scrapped"]),
         ProductionOrder.due_date == today
     ).count()
 
     overdue = db.query(ProductionOrder).filter(
-        ProductionOrder.status.notin_(["complete", "cancelled"]),
+        ProductionOrder.status.notin_(["complete", "cancelled", "scrapped"]),
         ProductionOrder.due_date < today
     ).count()
 
@@ -1777,5 +1781,6 @@ from app.services.production_order_execution_service import (  # noqa: E402,F401
     start_production_order,
     complete_production_order,
     accept_short_production_order,
+    close_scrapped_production_order,
     split_production_order,
 )

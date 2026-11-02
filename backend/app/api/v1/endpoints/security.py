@@ -20,18 +20,31 @@ from pydantic import BaseModel
 
 from app.db.session import get_db
 from app.models.user import User
-from app.api.v1.endpoints.auth import get_current_user
+from app.api.v1.deps import get_current_admin_user
 from app.core.config import settings
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/security", tags=["Security"])
+# SEC-409: every route here is admin-only. The gate sits on the router so it
+# runs before require_local_remediation and any other check, and a new route
+# added here cannot forget it.
+router = APIRouter(
+    prefix="/security",
+    tags=["Security"],
+    dependencies=[Depends(get_current_admin_user)],
+)
 
 
 def require_local_remediation():
-    """Dependency that blocks remediation endpoints in production."""
-    if getattr(settings, "ENVIRONMENT", "development") == "production":
+    """Dependency that blocks remediation endpoints in production.
+
+    Uses settings.is_production, like every other production check
+    (trimmed, any case), so "production " or "Production" also block. It is
+    only an environment check: a Docker install keeps the default
+    ENVIRONMENT=development, so these routes stay open to admins there.
+    """
+    if settings.is_production:
         raise HTTPException(
             status_code=403,
             detail="This endpoint is disabled in production environments"
@@ -155,7 +168,7 @@ def run_security_audit() -> dict:
 
 @router.get("/audit", response_model=SecurityAuditResponse)
 async def get_security_audit(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ):
     """
@@ -163,13 +176,6 @@ async def get_security_audit(
 
     Requires admin authentication.
     """
-    # Require admin role
-    if not current_user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin role required"
-        )
-
     logger.info(f"Security audit requested by {current_user.email}")
 
     result = run_security_audit()
@@ -201,7 +207,7 @@ async def get_security_audit(
 @router.get("/audit/export")
 async def export_security_audit(
     format: str = "json",
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ):
     """
@@ -212,13 +218,6 @@ async def export_security_audit(
 
     Requires admin authentication.
     """
-    # Require admin role
-    if not current_user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin role required"
-        )
-
     if format not in ["json"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -252,21 +251,15 @@ async def export_security_audit(
 
 @router.get("/status")
 async def get_security_status(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ):
     """
     Get quick security status overview.
 
     Returns a simplified status for display in navigation/header.
-    Requires authentication.
+    Requires admin authentication.
     """
-    if not current_user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin role required"
-        )
-
     try:
         result = run_security_audit()
         summary = result.get("summary", {})
@@ -312,7 +305,7 @@ async def get_security_status(
 
 @router.post("/remediate/generate-secret-key")
 async def generate_secret_key(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
     _gate=Depends(require_local_remediation),
 ):
@@ -322,12 +315,6 @@ async def generate_secret_key(
     Does NOT automatically update the .env file - user must do that manually.
     This is intentional for security (we don't want to auto-modify config files).
     """
-    if not current_user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin role required"
-        )
-
     import secrets
     new_key = secrets.token_urlsafe(64)
 
@@ -348,7 +335,7 @@ async def generate_secret_key(
 
 @router.post("/remediate/open-env-file")
 async def open_env_file(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
     _gate=Depends(require_local_remediation),
 ):
@@ -357,15 +344,6 @@ async def open_env_file(
 
     Makes it easy for non-technical users to edit configuration.
     """
-    if not current_user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin role required"
-        )
-
-    import subprocess
-    import platform
-
     # Find the .env file path (backend/.env, same as settings.py)
     backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -378,32 +356,19 @@ async def open_env_file(
             detail=f"Configuration file not found at {env_path}"
         )
 
-    try:
-        # Open in default text editor based on platform
-        if platform.system() == "Windows":
-            # Use notepad on Windows
-            subprocess.Popen(["notepad.exe", env_path])
-        elif platform.system() == "Darwin":
-            # Use TextEdit on Mac
-            subprocess.Popen(["open", "-e", env_path])
-        else:
-            # Use xdg-open on Linux
-            subprocess.Popen(["xdg-open", env_path])
-
-        logger.info(f"Opened .env file for editing by {current_user.email}")
-        return {"success": True, "message": "Configuration file opened in text editor"}
-
-    except Exception as e:
-        logger.error(f"Failed to open .env file: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Could not open file: {str(e)}"
-        )
+    # SEC-401: Do not spawn OS GUI processes (notepad/open/xdg-open) from backend API.
+    # Return safe path and remediation instructions for manual or terminal editing.
+    logger.info(f"Env file path requested by {current_user.email}")
+    return {
+        "success": True,
+        "env_path": env_path,
+        "message": f"Configuration file located at {env_path}. Edit this file using your preferred editor.",
+    }
 
 
 @router.post("/remediate/update-secret-key")
 async def update_secret_key(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
     _gate=Depends(require_local_remediation),
 ):
@@ -413,12 +378,6 @@ async def update_secret_key(
     This is the easy mode for non-technical users.
     Generates a new key and updates the file automatically.
     """
-    if not current_user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin role required"
-        )
-
     import secrets
     import re
 
@@ -489,7 +448,7 @@ async def update_secret_key(
 
 @router.post("/remediate/open-restart-terminal")
 async def open_restart_terminal(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
     _gate=Depends(require_local_remediation),
 ):
@@ -498,73 +457,26 @@ async def open_restart_terminal(
 
     Makes it easy for non-technical users who may not have a terminal open.
     """
-    if not current_user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin role required"
-        )
-
-    import subprocess
-    import platform
-
     # Find the project root
     backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     )))
     project_root = os.path.dirname(backend_dir)
+    restart_cmd = ".\\start-backend.ps1" if sys.platform == "win32" else "./start-backend.sh"
 
-    try:
-        if platform.system() == "Windows":
-            # Open a standalone PowerShell window (not inside VS Code)
-            # Using 'start' command spawns a detached process
-            ps_script = (
-                f"cd '{project_root}'; "
-                "Write-Host ''; "
-                "Write-Host '========================================' -ForegroundColor Cyan; "
-                "Write-Host '  RESTART THE BACKEND' -ForegroundColor Yellow; "
-                "Write-Host '========================================' -ForegroundColor Cyan; "
-                "Write-Host ''; "
-                "Write-Host 'Run this command:' -ForegroundColor White; "
-                "Write-Host ''; "
-                "Write-Host '  .\\start-backend.ps1' -ForegroundColor Green; "
-                "Write-Host ''; "
-                "Write-Host '(If already running, press Ctrl+C first)' -ForegroundColor Gray; "
-                "Write-Host ''"
-            )
-            # Use 'start' to open a fresh PowerShell window detached from VS Code
-            subprocess.Popen(
-                f'start powershell -NoExit -Command "{ps_script}"',
-                shell=True,
-                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-            )
-        elif platform.system() == "Darwin":
-            # macOS - open Terminal
-            script = f'''tell application "Terminal"
-                do script "cd '{project_root}' && echo '' && echo '=== RESTART THE BACKEND ===' && echo 'Run: ./start-backend.sh'"
-                activate
-            end tell'''
-            subprocess.Popen(["osascript", "-e", script])
-        else:
-            # Linux - try common terminals
-            subprocess.Popen([
-                "x-terminal-emulator", "-e",
-                f"bash -c 'cd {project_root} && echo \"=== RESTART THE BACKEND ===\"; echo \"Run: ./start-backend.sh\"; exec bash'"
-            ])
-
-        logger.info(f"Opened restart terminal for {current_user.email}")
-        return {"success": True, "message": "Terminal opened with restart instructions"}
-
-    except Exception as e:
-        logger.error(f"Failed to open terminal: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Could not open terminal: {str(e)}"
-        )
+    # SEC-401: Do not spawn OS terminal windows from backend API.
+    logger.info(f"Restart instructions requested by {current_user.email}")
+    return {
+        "success": True,
+        "project_root": project_root,
+        "restart_command": restart_cmd,
+        "message": f"To restart the backend, navigate to {project_root} and run: {restart_cmd}",
+    }
 
 
 @router.post("/remediate/fix-dependencies")
 async def fix_dependencies(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
     _gate=Depends(require_local_remediation),
 ):
@@ -574,12 +486,6 @@ async def fix_dependencies(
     This uses pip-audit to identify and upgrade vulnerable packages.
     Non-technical users don't need to know about venvs or pip.
     """
-    if not current_user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin role required"
-        )
-
     import subprocess
 
     # Find the venv path (backend/venv)
@@ -729,7 +635,7 @@ async def fix_dependencies(
 
 @router.post("/remediate/fix-rate-limiting")
 async def fix_rate_limiting(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
     _gate=Depends(require_local_remediation),
 ):
@@ -738,12 +644,6 @@ async def fix_rate_limiting(
 
     FilaOps auto-detects slowapi on startup and enables rate limiting.
     """
-    if not current_user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin role required"
-        )
-
     import subprocess
 
     # Find the venv pip path
@@ -810,27 +710,17 @@ class SetupHTTPSRequest(BaseModel):
 @router.post("/remediate/setup-https")
 async def setup_https(
     request: SetupHTTPSRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
     _gate=Depends(require_local_remediation),
 ):
     """
-    Automatically set up HTTPS with Caddy reverse proxy.
+    Safely configure HTTPS with Caddy reverse proxy.
 
-    Steps:
-    1. Check if Caddy is installed
-    2. Install Caddy if needed (via winget on Windows)
-    3. Create Caddyfile with user's domain
-    4. Start Caddy
+    Generates Caddyfile and updates Vite configuration without executing
+    arbitrary shell scripts or downloading remote binaries (SEC-401).
     """
-    if not current_user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin role required"
-        )
-
-    import subprocess
-    import platform
+    import shutil
 
     domain = validate_domain(request.domain)
 
@@ -840,8 +730,16 @@ async def setup_https(
     )))
     project_root = os.path.dirname(backend_dir)
 
+    caddy_on_path = shutil.which("caddy") is not None
+    local_caddy_exists = os.path.exists(os.path.join(project_root, "caddy.exe"))
+    caddy_installed = caddy_on_path or local_caddy_exists
+    # PowerShell won't run a program from the current folder by bare name,
+    # so a caddy.exe that only sits in the project folder needs a .\ prefix.
+    caddy_command = "caddy" if caddy_on_path or not local_caddy_exists else r".\caddy.exe"
+
     results = {
-        "caddy_installed": False,
+        "caddy_installed": caddy_installed,
+        "caddy_command": caddy_command,
         "caddy_was_installed": False,
         "caddyfile_created": False,
         "caddy_started": False,
@@ -849,97 +747,7 @@ async def setup_https(
         "errors": []
     }
 
-    try:
-        # Step 1: Check if Caddy is installed
-        logger.info("Checking if Caddy is installed...")
-        caddy_check = subprocess.run(
-            ["caddy", "version"],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-
-        if caddy_check.returncode == 0:
-            results["caddy_installed"] = True
-            logger.info(f"Caddy already installed: {caddy_check.stdout.strip()}")
-        else:
-            raise FileNotFoundError("Caddy not found")
-
-    except (FileNotFoundError, subprocess.SubprocessError):
-        # Caddy not installed - try to download it directly
-        logger.info("Caddy not found - attempting to download from GitHub...")
-
-        if platform.system() == "Windows":
-            caddy_exe_path = os.path.join(project_root, "caddy.exe")
-
-            try:
-                # Download Caddy from GitHub releases using PowerShell
-                # This is more reliable than winget
-                download_script = f'''
-$ErrorActionPreference = "Stop"
-$caddyPath = "{caddy_exe_path}"
-
-# Get latest release info from GitHub API
-$release = Invoke-RestMethod -Uri "https://api.github.com/repos/caddyserver/caddy/releases/latest"
-$version = $release.tag_name
-
-# Find the Windows AMD64 asset
-$asset = $release.assets | Where-Object {{ $_.name -like "*windows_amd64.zip" }} | Select-Object -First 1
-
-if (-not $asset) {{
-    throw "Could not find Windows AMD64 release"
-}}
-
-Write-Host "Downloading Caddy $version..."
-$zipPath = "$env:TEMP\\caddy.zip"
-Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
-
-Write-Host "Extracting..."
-$extractPath = "$env:TEMP\\caddy_extract"
-if (Test-Path $extractPath) {{ Remove-Item -Recurse -Force $extractPath }}
-Expand-Archive -Path $zipPath -DestinationPath $extractPath
-
-# Find and copy caddy.exe
-$caddyExe = Get-ChildItem -Path $extractPath -Recurse -Filter "caddy.exe" | Select-Object -First 1
-if ($caddyExe) {{
-    Copy-Item $caddyExe.FullName -Destination $caddyPath -Force
-    Write-Host "Caddy installed to: $caddyPath"
-}} else {{
-    throw "caddy.exe not found in archive"
-}}
-
-# Cleanup
-Remove-Item $zipPath -Force
-Remove-Item $extractPath -Recurse -Force
-'''
-                # Run PowerShell to download Caddy
-                ps_result = subprocess.run(
-                    ["powershell", "-ExecutionPolicy", "Bypass", "-Command", download_script],
-                    capture_output=True,
-                    text=True,
-                    timeout=120
-                )
-
-                if ps_result.returncode == 0 and os.path.exists(caddy_exe_path):
-                    results["caddy_installed"] = True
-                    results["caddy_was_installed"] = True
-                    results["caddy_path"] = caddy_exe_path
-                    logger.info(f"Caddy downloaded successfully to {caddy_exe_path}")
-                else:
-                    logger.warning(f"Caddy download failed: {ps_result.stderr}")
-                    results["caddy_installed"] = False
-                    results["needs_caddy_install"] = True
-
-            except Exception as e:
-                logger.warning(f"Failed to download Caddy: {e}")
-                results["caddy_installed"] = False
-                results["needs_caddy_install"] = True
-        else:
-            # Linux/Mac - tell user to install manually
-            results["caddy_installed"] = False
-            results["needs_caddy_install"] = True
-
-    # Step 3: Create Caddyfile
+    # Step 1: Create Caddyfile
     logger.info(f"Creating Caddyfile for domain: {domain}")
     caddyfile_path = os.path.join(project_root, "Caddyfile")
 
@@ -977,133 +785,14 @@ Remove-Item $extractPath -Recurse -Force
             detail=f"Could not create Caddyfile: {str(e)}"
         )
 
-    # Step 4: Create desktop shortcut
-    logger.info("Creating desktop shortcut...")
-    results["shortcut_created"] = False
-
-    try:
-        if platform.system() == "Windows":
-            # Get desktop path using Windows Shell API (handles OneDrive redirection)
-            desktop = None
-            try:
-                import ctypes
-
-                # Use SHGetFolderPathW to get the actual Desktop path
-                # CSIDL_DESKTOP = 0x0000 is the Desktop folder
-                buf = ctypes.create_unicode_buffer(260)
-                ctypes.windll.shell32.SHGetFolderPathW(None, 0x0000, None, 0, buf)
-                if buf.value:
-                    desktop = buf.value
-                    logger.info(f"Desktop path from Shell API: {desktop}")
-            except Exception as e:
-                logger.warning(f"Shell API desktop detection failed: {e}")
-
-            # Fallback methods if Shell API fails
-            if not desktop or not os.path.exists(desktop):
-                # Try OneDrive Desktop path first (most common for new Windows setups)
-                onedrive_desktop = os.path.join(os.path.expanduser("~"), "OneDrive", "Desktop")
-                if os.path.exists(onedrive_desktop):
-                    desktop = onedrive_desktop
-                    logger.info(f"Using OneDrive Desktop path: {desktop}")
-                else:
-                    # Fallback to standard Desktop path
-                    desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-                    logger.info(f"Using standard Desktop path: {desktop}")
-
-            # Create the Desktop folder if it doesn't exist (rare edge case)
-            if not os.path.exists(desktop):
-                logger.warning(f"Desktop folder not found at {desktop}, creating it...")
-                os.makedirs(desktop, exist_ok=True)
-
-            # Create a batch file launcher
-            frontend_path = os.path.join(project_root, "frontend")
-            launcher_path = os.path.join(desktop, "Start FilaOps.bat")
-            launcher_content = f'''@echo off
-title FilaOps Server
-color 0A
-echo.
-echo  ======================================
-echo    Starting FilaOps ERP Server
-echo  ======================================
-echo.
-echo  Domain: {domain}
-echo.
-
-:: Check if hosts file already has the entry
-findstr /C:"{domain}" %SystemRoot%\\System32\\drivers\\etc\\hosts > nul 2>&1
-if errorlevel 1 (
-    echo  Adding {domain} to hosts file...
-    echo  [This requires administrator permission - click Yes if prompted]
-    powershell -Command "Start-Process powershell -ArgumentList '-Command', 'Add-Content -Path ''$env:SystemRoot\\System32\\drivers\\etc\\hosts'' -Value ''127.0.0.1 {domain}'' -Force; Write-Host ''Done!''; Start-Sleep 2' -Verb RunAs" 2>nul
-    timeout /t 2 /nobreak > nul
-)
-
-:: Start the backend
-cd /d "{project_root}"
-echo  Starting Backend API...
-start "FilaOps Backend" powershell -NoExit -Command "cd '{project_root}'; .\\start-backend.ps1"
-
-:: Start the frontend
-echo  Starting Frontend...
-start "FilaOps Frontend" powershell -NoExit -Command "cd '{frontend_path}'; npm run dev"
-
-:: Wait for servers to start
-echo  Waiting for servers to start...
-timeout /t 8 /nobreak > nul
-
-:: Start Caddy (use local caddy.exe if available)
-echo  Starting HTTPS server (Caddy)...
-if exist "{project_root}\\caddy.exe" (
-    start "Caddy HTTPS" "{project_root}\\caddy.exe" run --config "{caddyfile_path}"
-) else (
-    start "Caddy HTTPS" caddy run --config "{caddyfile_path}"
-)
-
-:: Wait a moment then open browser
-timeout /t 3 /nobreak > nul
-echo.
-echo  Opening browser to https://{domain}
-start https://{domain}
-
-echo.
-echo  ======================================
-echo    FilaOps is running!
-echo  ======================================
-echo.
-echo  Backend:  http://localhost:8000
-echo  Frontend: http://localhost:5173
-echo  HTTPS:    https://{domain}
-echo.
-echo  Press any key to stop all servers...
-pause > nul
-
-:: Stop servers
-taskkill /FI "WINDOWTITLE eq FilaOps Backend*" > nul 2>&1
-taskkill /FI "WINDOWTITLE eq FilaOps Frontend*" > nul 2>&1
-taskkill /FI "WINDOWTITLE eq Caddy HTTPS*" > nul 2>&1
-echo  Servers stopped.
-'''
-            with open(launcher_path, "w") as f:
-                f.write(launcher_content)
-
-            results["shortcut_created"] = True
-            results["shortcut_path"] = launcher_path
-            logger.info(f"Desktop launcher created at {launcher_path}")
-
-    except Exception as e:
-        results["errors"].append(f"Failed to create desktop shortcut: {str(e)}")
-        # Non-fatal error
-
-    # Step 4.5: Update vite.config.js to allow the domain
+    # Step 2: Update vite.config.js to allow the domain
     vite_config_path = os.path.join(project_root, "frontend", "vite.config.js")
     if os.path.exists(vite_config_path):
         try:
             with open(vite_config_path, "r") as f:
                 vite_content = f.read()
 
-            # Check if allowedHosts already configured
             if "allowedHosts" not in vite_content:
-                # Add server.allowedHosts config
                 vite_content = vite_content.replace(
                     "export default defineConfig({",
                     f"""export default defineConfig({{
@@ -1116,7 +805,6 @@ echo  Servers stopped.
                 logger.info(f"Updated vite.config.js with allowedHosts for {domain}")
                 results["vite_updated"] = True
             elif domain not in vite_content:
-                # Add domain to existing allowedHosts
                 import re
                 pattern = r"allowedHosts:\s*\[([^\]]*)\]"
                 match = re.search(pattern, vite_content)
@@ -1132,48 +820,19 @@ echo  Servers stopped.
             logger.warning(f"Could not update vite.config.js: {e}")
             results["errors"].append(f"Could not update Vite config: {str(e)}")
 
-    # Step 5: Start Caddy (only if installed)
-    if results["caddy_installed"]:
-        logger.info("Starting Caddy...")
-        try:
-            if platform.system() == "Windows":
-                # Use local caddy.exe if we downloaded it, otherwise use system caddy
-                caddy_exe = results.get("caddy_path", "caddy")
-                subprocess.Popen(
-                    ["cmd", "/c", "start", "Caddy Server", caddy_exe, "run", "--config", caddyfile_path],
-                    shell=False,
-                    cwd=project_root,
-                    creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-                )
-            else:
-                subprocess.Popen(
-                    ["caddy", "run", "--config", caddyfile_path],
-                    cwd=project_root,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-
-            results["caddy_started"] = True
-            logger.info("Caddy started successfully")
-
-        except Exception as e:
-            results["errors"].append(f"Failed to start Caddy: {str(e)}")
-    else:
-        results["caddy_started"] = False
-
-    logger.info(f"HTTPS setup completed by {current_user.email} for domain {domain}")
-
-    # Build appropriate message
-    if results.get("needs_caddy_install"):
+    # SEC-401: Do not execute remote binary downloads or start background shell processes.
+    if not caddy_installed:
+        results["needs_caddy_install"] = True
         message = (
             f"Configuration created for {domain}! "
-            "Now install Caddy from https://caddyserver.com/download, "
-            "then use the desktop shortcut to start everything."
+            "Please install Caddy from https://caddyserver.com/download, "
+            "then run 'caddy run' in your project directory. If you saved "
+            r"caddy.exe in that folder instead, run '.\caddy.exe run' in PowerShell."
         )
-    elif results["caddy_started"]:
-        message = f"HTTPS configured for {domain}! Caddy is now running."
     else:
-        message = f"HTTPS configured for {domain}! Start Caddy manually with: caddy run"
+        message = f"HTTPS configured for {domain}! Start Caddy manually with: {caddy_command} run"
+
+    logger.info(f"HTTPS setup completed by {current_user.email} for domain {domain}")
 
     return {
         "success": True,
@@ -1184,17 +843,11 @@ echo  Servers stopped.
 
 @router.get("/remediate/check-caddy")
 async def check_caddy_status(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
     _gate=Depends(require_local_remediation),
 ):
     """Check if Caddy is installed and get its version."""
-    if not current_user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin role required"
-        )
-
     import subprocess
 
     try:
@@ -1219,7 +872,7 @@ async def check_caddy_status(
 
 @router.post("/remediate/fix-dotfile-blocking")
 async def fix_dotfile_blocking(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
     _gate=Depends(require_local_remediation),
 ):
@@ -1228,12 +881,6 @@ async def fix_dotfile_blocking(
 
     This prevents sensitive files from being exposed through the web server.
     """
-    if not current_user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin role required"
-        )
-
     import subprocess
 
     # Find the project root and Caddyfile
@@ -1392,7 +1039,7 @@ async def fix_dotfile_blocking(
 @router.get("/remediate/{check_id}")
 async def get_remediation_steps(
     check_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
     _gate=Depends(require_local_remediation),
 ):
@@ -1401,12 +1048,6 @@ async def get_remediation_steps(
 
     Returns step-by-step instructions, code snippets, and file paths.
     """
-    if not current_user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin role required"
-        )
-
     # Remediation guides for each check
     remediation_guides = {
         "secret_key_not_default": {

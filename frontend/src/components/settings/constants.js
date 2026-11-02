@@ -35,6 +35,7 @@ export const timezoneOptions = [
   // Asia
   { value: "Asia/Dubai", label: "UAE - Dubai (GST)" },
   { value: "Asia/Kolkata", label: "India - IST" },
+  { value: "Asia/Colombo", label: "Sri Lanka - Colombo (UTC+5:30)" },
   { value: "Asia/Kathmandu", label: "Nepal - Kathmandu (NPT, UTC+5:45)" },
   { value: "Asia/Singapore", label: "Singapore (SGT)" },
   { value: "Asia/Hong_Kong", label: "Hong Kong (HKT)" },

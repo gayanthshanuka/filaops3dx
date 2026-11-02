@@ -24,10 +24,12 @@ from datetime import datetime, timezone
 from app.core.limiter import apply_rate_limiting
 from app.core.paths import (
     resolve_frontend_dist,
+    resolve_legacy_product_images_dir,
     resolve_static_dir,
     resolve_surface_dist,
     resolve_upload_products_dir,
 )
+from app.core.static_files import MultiDirStaticFiles
 from app.api.v1 import router as api_v1_router
 from app.core.config import settings
 from app.exceptions import FilaOpsException
@@ -75,7 +77,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # Permissions policy
         response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
         # HSTS in production
-        if getattr(settings, "ENVIRONMENT", "development") == "production":
+        if settings.is_production:
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
 
@@ -159,6 +161,15 @@ def log_startup_configuration():
     logger.info(f"Environment: {getattr(settings, 'ENVIRONMENT', 'development')}")
     logger.info(f"Debug Mode: {getattr(settings, 'DEBUG', False)}")
     logger.info(f"Tier: {getattr(settings, 'TIER', 'open')}")
+
+    # Email: an SMTP login alone is not enough (see Settings.email_configured).
+    if getattr(settings, "SMTP_USER", None) and not settings.email_configured:
+        logger.warning(
+            "SMTP_USER is set but email is off: SMTP_PASSWORD must be set too, "
+            "and ADMIN_APPROVAL_EMAIL must be a real address (not empty and "
+            "not a placeholder such as admin@example.com). Password reset "
+            "requests wait for an administrator until then."
+        )
     logger.info("=" * 60)
 
 
@@ -180,17 +191,23 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down FilaOps ERP API")
 
 
+def _api_docs_urls(app_settings) -> dict:
+    """Swagger UI, ReDoc and the OpenAPI schema, or None for each in production.
+
+    Disabled in production to prevent API schema exposure.
+    """
+    if app_settings.is_production:
+        return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    return {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
+
+
 # Create FastAPI app
-# Disable Swagger/OpenAPI in production to prevent API schema exposure
-_is_production = getattr(settings, "ENVIRONMENT", "development") == "production"
 app = FastAPI(
     title="FilaOps ERP API",
     description="Open-source ERP for 3D print farms",
     version=settings.VERSION,
     lifespan=lifespan,
-    docs_url="/docs" if not _is_production else None,
-    redoc_url="/redoc" if not _is_production else None,
-    openapi_url="/openapi.json" if not _is_production else None,
+    **_api_docs_urls(settings),
 )
 
 # Optional rate limiting (no crash if slowapi isn't installed)
@@ -381,8 +398,9 @@ app.include_router(api_v1_router, prefix="/api/v1")
 # startup log already names the cause.
 STATIC_DIR = resolve_static_dir(settings.STATIC_DIR)
 PRODUCT_UPLOADS_DIR = resolve_upload_products_dir(
-    settings.UPLOAD_PRODUCTS_DIR, static_dir=STATIC_DIR
+    settings.UPLOAD_PRODUCTS_DIR, static_override=settings.STATIC_DIR
 )
+LEGACY_PRODUCT_IMAGES_DIR = resolve_legacy_product_images_dir(STATIC_DIR)
 
 
 def _try_mkdir(path: Path) -> bool:
@@ -401,6 +419,19 @@ if not _uploads_ok:
         "Product image uploads will fail at runtime — directory not "
         "writable: %s. Set UPLOAD_PRODUCTS_DIR to a writable path.",
         PRODUCT_UPLOADS_DIR,
+    )
+# Product images keep their /static/uploads/products/<name> URLs but are
+# stored in PRODUCT_UPLOADS_DIR (the uploads volume in Docker). Images saved
+# under the old in-container default are still served as a fallback. This
+# mount must be registered before /static, which would otherwise claim the
+# whole prefix.
+if _uploads_ok:
+    app.mount(
+        "/static/uploads/products",
+        MultiDirStaticFiles(
+            directories=[PRODUCT_UPLOADS_DIR, LEGACY_PRODUCT_IMAGES_DIR]
+        ),
+        name="product-images",
     )
 if _static_ok:
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

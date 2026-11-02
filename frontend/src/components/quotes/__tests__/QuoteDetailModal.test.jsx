@@ -19,7 +19,8 @@ const quote = {
   has_image: false,
   line_count: 1,
   created_at: "2026-05-21T12:00:00Z",
-  expires_at: "2026-08-19T12:00:00Z",
+  // Relative so the "still valid" fixture never silently expires.
+  expires_at: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
   sales_order_id: null,
   updated_at: "2026-05-21T12:00:00Z",
   approved_at: null,
@@ -230,6 +231,40 @@ describe("QuoteDetailModal attachments", () => {
 
     expect(onEdit).toHaveBeenCalledWith(detailQuote);
     expect(onDuplicate).toHaveBeenCalledWith(detailQuote);
+  });
+
+  it("shows a zero shipping cost on a quote that has a ship-to address", async () => {
+    quoteFiles = [];
+    detailQuote = {
+      ...quote,
+      shipping_cost: "0.00",
+      shipping_address_line1: "1 Far Away Rd",
+      shipping_city: "Anchorage",
+      shipping_state: "AK",
+      shipping_zip: "99501",
+    };
+
+    renderModal();
+
+    await waitFor(() => {
+      expect(screen.getByText("Shipping:")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Shipping:").nextSibling).toHaveTextContent("$0.00");
+  });
+
+  it("leaves out the shipping line when there is no ship-to or shipping cost", async () => {
+    quoteFiles = [];
+    detailQuote = { ...quote, shipping_cost: null, shipping_address_line1: null };
+
+    renderModal();
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/api/v1/quotes/42"),
+        expect.anything(),
+      );
+    });
+    expect(screen.queryByText("Shipping:")).not.toBeInTheDocument();
   });
 
   it("does not offer edit or delete actions after customer acceptance", async () => {

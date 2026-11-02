@@ -226,6 +226,9 @@ class ReleasePlannedOrderRequest(BaseModel):
     """Release a planned order to actual PO or MO"""
     vendor_id: Optional[int] = None  # Required for purchase orders
     notes: Optional[str] = None
+    # Release only this much of the planned quantity; the rest stays planned.
+    # Omit to release it all. More than planned is rejected with 422.
+    quantity: Optional[Decimal] = Field(None, gt=0, decimal_places=4)
 
 
 class ReleasePlannedOrderResponse(BaseModel):
@@ -236,6 +239,8 @@ class ReleasePlannedOrderResponse(BaseModel):
     created_purchase_order_code: Optional[str] = None
     created_production_order_id: Optional[int] = None
     created_production_order_code: Optional[str] = None
+    released_quantity: Optional[Decimal] = None  # quantity on the created order
+    remaining_quantity: Optional[Decimal] = None  # still planned; 0 after a full release
 
 
 # ============================================================================
@@ -259,3 +264,30 @@ class ProductPegging(BaseModel):
     product_sku: str
     supplies: List[PeggingEntry]
     demands: List[PeggingEntry]
+
+
+# ============================================================================
+# Make-vs-buy dry-run diff (MRP_ROUTING_MAKE_BUY)
+# ============================================================================
+
+class MakeBuyDiffEntry(BaseModel):
+    """A product whose open planned orders would change type under the routing make-vs-buy rule"""
+    product_id: int
+    product_sku: str
+    product_name: str
+    procurement_type: Optional[str] = None
+    has_bom: bool
+    current_order_type: str  # today's decision: has_bom only
+    proposed_order_type: str  # decision under the rule
+    reason: str  # buy_override | bom | routing_materials | no_make_source
+    planned_order_ids: List[int]
+
+
+class MakeBuyDryRunDiff(BaseModel):
+    """Read-only comparison of make-vs-buy decisions over open planned orders"""
+    flag_enabled: bool  # MRP_ROUTING_MAKE_BUY as currently configured
+    statuses: List[str]
+    planned_orders_checked: int
+    products_checked: int
+    changes: List[MakeBuyDiffEntry]
+    total_changes: int

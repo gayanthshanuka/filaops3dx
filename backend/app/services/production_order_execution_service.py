@@ -2,12 +2,13 @@
 Production Order Execution Service — lifecycle transitions.
 
 Moved from production_order_service.py (DEBT-1 D2-A mechanical split). Holds the
-start / complete / accept-short / split lifecycle transitions. No behavior
+start / complete / accept-short / close-scrapped / split lifecycle transitions.
+close-scrapped was added after the split; the rest moved without behavior
 change.
 """
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -230,7 +231,8 @@ def accept_short_production_order(
     if qty_completed <= 0:
         raise HTTPException(
             status_code=400,
-            detail="Cannot accept short: no units have been completed."
+            detail="Cannot accept short: no units have been completed. "
+                   "If the whole run was scrapped, close the order as scrapped instead."
         )
     if qty_completed >= qty_ordered:
         raise HTTPException(
@@ -358,10 +360,127 @@ def accept_short_production_order(
     return order
 
 
+def close_scrapped_production_order(
+    db: Session,
+    order_id: int,
+    user_email: str,
+    user_id: int,
+    notes: Optional[str] = None,
+) -> ProductionOrder:
+    """Close a 'short' order that made nothing as 'scrapped'.
+
+    A whole-plate failure ends with every unit scrapped: the order is 'short'
+    with nothing completed. Accept-short has nothing to receipt, and cancelling
+    would throw away a run that did consume material and cost money. This is
+    the close for that case.
+
+    The scrap entry (DR 5020 Scrap / CR 1210 WIP) was already posted when the
+    units were scrapped. What is left is the filament the operation consumed,
+    which has not been journaled, so the same completion sweep accept-short
+    uses runs here: DR 1210 / CR the inventory account for the consumption,
+    and whatever WIP is left over after the scrap entry goes to 5200. No
+    finished goods are received.
+
+    The order keeps its sales-order link, so the sale stays visibly short and a
+    remake (remake_of_id) can pick it up. Remaining reservations are released.
+    A CloseShortRecord is written, as for accept-short.
+
+    Only a 'short' order with nothing completed and some scrap recorded may be
+    closed this way. An order with good units is accepted short; an order with
+    nothing scrapped did not fail, so it is cancelled.
+    """
+    from app.models.close_short_record import CloseShortRecord
+    from app.models.inventory import InventoryTransaction
+    from app.services.inventory_service import release_production_reservations
+    from app.services.production_gl_service import (
+        create_production_completion_gl_entry,
+    )
+
+    # Lock the row so a concurrent close cannot sweep and post twice
+    order = (
+        db.query(ProductionOrder)
+        .filter(ProductionOrder.id == order_id)
+        .with_for_update()
+        .first()
+    )
+    if not order:
+        raise HTTPException(status_code=404, detail="Production order not found")
+
+    if order.status != "short":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot close as scrapped on order in '{order.status}' status. "
+                   f"Order must be in 'short' status."
+        )
+
+    qty_completed = Decimal(str(order.quantity_completed or 0))
+    qty_ordered = Decimal(str(order.quantity_ordered))
+    qty_scrapped = Decimal(str(order.quantity_scrapped or 0))
+    if qty_completed > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot close as scrapped: {qty_completed} units were completed. "
+                   f"Use accept-short to complete the order with what was made."
+        )
+    if qty_scrapped <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot close as scrapped: no scrap has been recorded on this order. "
+                   "Cancel it instead if it will not be made."
+        )
+
+    # Nothing was made, so nothing may have been received. A receipt here means
+    # the order's inventory was already processed by another path.
+    existing_receipt = db.query(InventoryTransaction).filter(
+        InventoryTransaction.reference_type == "production_order",
+        InventoryTransaction.reference_id == order.id,
+        InventoryTransaction.transaction_type == "receipt",
+    ).first()
+    if existing_receipt:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Inventory already processed for {order.code}. "
+                   f"Cannot close as scrapped."
+        )
+
+    release_production_reservations(db, order, user_email)
+    create_production_completion_gl_entry(db, order, user_id=user_id)
+
+    now = datetime.now(timezone.utc)
+    order.status = "scrapped"
+    order.scrapped_at = now
+    if not order.actual_end:
+        order.actual_end = now
+    order.updated_at = now
+
+    if notes:
+        timestamp = now.isoformat()
+        if order.notes:
+            order.notes = f"{order.notes}\n[{timestamp}] Closed as scrapped: {notes}"
+        else:
+            order.notes = f"[{timestamp}] Closed as scrapped: {notes}"
+
+    db.add(CloseShortRecord(
+        entity_type="production_order",
+        entity_id=order_id,
+        performed_by=user_id,
+        reason=notes,
+        line_adjustments=[{
+            "before_qty": str(qty_ordered),
+            "after_qty": "0",
+            "reason": f"Closed as scrapped: {qty_scrapped} of {qty_ordered} scrapped, none completed",
+        }],
+    ))
+
+    logger.info(f"Production order {order.code} closed as scrapped by {user_email}")
+
+    return order
+
+
 def split_production_order(
     db: Session,
     order_id: int,
-    split_quantity: int,
+    split_quantity: Union[int, Decimal],
     user_email: str,
     reason: Optional[str] = None,
 ) -> tuple[ProductionOrder, ProductionOrder]:
@@ -370,7 +489,7 @@ def split_production_order(
 
     Args:
         order_id: Order to split
-        split_quantity: Quantity for the new order
+        split_quantity: Quantity for the new order (may be fractional)
         user_email: User performing the split
         reason: Reason for split
 
@@ -378,6 +497,11 @@ def split_production_order(
         Tuple of (original_order, new_order)
     """
     from app.services.inventory_service import reserve_production_materials
+    from app.services.production_order_quantity_change import (
+        release_excess_reservations,
+        require_storable_order_quantity,
+        rescale_unstarted_operations,
+    )
     from app.services.production_order_service import (
         get_production_order,
         generate_production_order_code,
@@ -392,18 +516,29 @@ def split_production_order(
             detail=f"Cannot split order in {order.status} status"
         )
 
+    # Refused before either order is touched: a split the column cannot store
+    # (0.00001 -> 0) would still size the child's materials from the longer figure.
+    split_quantity = require_storable_order_quantity(split_quantity, "Split quantity")
     if split_quantity <= 0:
         raise HTTPException(status_code=400, detail="Split quantity must be positive")
 
-    remaining = order.quantity_ordered - split_quantity
+    # Exact quantities: a fractional order keeps its fraction through the split.
+    original_quantity = Decimal(str(order.quantity_ordered))
+    remaining = original_quantity - split_quantity
     if remaining <= 0:
         raise HTTPException(
             status_code=400,
             detail=f"Split quantity ({split_quantity}) must be less than ordered ({order.quantity_ordered})"
         )
 
-    # Update original order quantity
+    # Update original order quantity, then bring its unstarted operations
+    # (planned minutes, material requirements) and its reservations down to
+    # the remaining quantity. Operations already queued or running keep
+    # their numbers: that work is committed.
     order.quantity_ordered = remaining
+    rescale_unstarted_operations(db, order, original_quantity)
+    db.flush()
+    release_excess_reservations(db, order, created_by=user_email)
 
     # Create new order
     new_code = generate_production_order_code(db)

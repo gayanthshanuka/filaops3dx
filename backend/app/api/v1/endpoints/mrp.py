@@ -6,6 +6,8 @@ Endpoints for:
 - Managing planned orders
 - Viewing requirements and supply/demand
 """
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -20,9 +22,12 @@ from app.schemas.mrp import (
     PlannedOrderListResponse,
     FirmPlannedOrderRequest, ReleasePlannedOrderRequest, ReleasePlannedOrderResponse,
     RequirementsSummary, NetRequirement,
-    SupplyDemandTimeline
+    SupplyDemandTimeline,
+    MakeBuyDryRunDiff,
 )
 from app.services.mrp import MRPService
+from app.services.make_buy import make_buy_dry_run_diff
+from app.services.mrp_release import InvalidReleaseQuantity
 
 
 router = APIRouter(
@@ -163,6 +168,22 @@ async def list_planned_orders(
     )
 
 
+@router.get("/planned-orders/dry-run-diff", response_model=MakeBuyDryRunDiff)
+async def planned_orders_make_buy_dry_run_diff(
+    db: Session = Depends(get_db)
+):
+    """
+    Dry run of the routing make-vs-buy rule over open planned orders.
+
+    Read-only. For every product with a planned or firmed planned order it
+    decides make-vs-buy both ways: today's test (has_bom only) and the
+    MRP_ROUTING_MAKE_BUY rule (has_bom OR an active routing with real
+    materials; procurement_type "buy" always wins). Lists the products whose
+    order_type would differ and why. Use it before turning the flag on.
+    """
+    return make_buy_dry_run_diff(db)
+
+
 @router.get("/planned-orders/{order_id}", response_model=PlannedOrderResponse)
 async def get_planned_order(
     order_id: int,
@@ -253,6 +274,9 @@ async def release_planned_order(
 
     For purchase orders, vendor_id is required.
     This creates the actual purchase order or production order.
+
+    With ``quantity`` below the planned quantity, only that much is released and
+    the planned order stays open with the remainder.
     """
     service = MRPService(db)
 
@@ -260,12 +284,18 @@ async def release_planned_order(
         order, created_id = service.release_planned_order(
             planned_order_id=order_id,
             vendor_id=request.vendor_id,
-            notes=request.notes
+            notes=request.notes,
+            quantity=request.quantity,
         )
 
+        # A full release leaves the planned quantity as it was; a partial one
+        # reduces it to the remainder.
+        fully_released = order.status == "released"
         response = ReleasePlannedOrderResponse(
             planned_order_id=order.id,
-            order_type=order.order_type
+            order_type=order.order_type,
+            released_quantity=order.quantity if fully_released else request.quantity,
+            remaining_quantity=Decimal("0") if fully_released else order.quantity,
         )
 
         if order.order_type == "purchase":
@@ -283,6 +313,8 @@ async def release_planned_order(
 
         return response
 
+    except InvalidReleaseQuantity as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

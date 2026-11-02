@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
 from app.db.session import get_db
-from app.models.production_order import ProductionOrder
+from app.models.production_order import ProductionOrder, ProductionOrderOperation
 from app.models.manufacturing import Resource
 from app.models.printer import Printer
 from app.models.work_center import WorkCenter
@@ -25,7 +25,7 @@ from app.schemas.scheduling import (
     AvailableSlotResponse,
     MachineAvailabilityResponse,
 )
-from app.api.v1.deps import get_current_user
+from app.api.v1.deps import get_current_staff_user
 from app.core.licensing_gate import require_feature
 from app.models.user import User
 from app.services.resource_compatibility_service import (
@@ -39,10 +39,14 @@ from app.services.resource_scheduling import (
     find_next_available_slot,
     find_window_conflicts,
     get_resource_schedule,
+    resolve_edit_slot,
     schedule_operation,
 )
 
-router = APIRouter()
+# SEC-409: every route here is staff-only (admin or operator). A plain login is
+# not enough, because anyone can self-register a customer account, and these
+# routes expose the shop schedule and reschedule production orders.
+router = APIRouter(dependencies=[Depends(get_current_staff_user)])
 
 
 def _naive_utc(dt: datetime) -> datetime:
@@ -112,12 +116,30 @@ def _merged_hours(intervals: List[Tuple[datetime, datetime]]) -> float:
     return total
 
 
+def _block_group_key(op) -> str:
+    """Identity of the block an operation occupies on the board: lane, start,
+    end. Operations booked together (resource_scheduling.
+    schedule_operations_together) share all three, so the frontend draws them
+    as one block. Printers and Resources have separate id spaces, so the lane
+    kind prefixes the id (same shape as the lane key)."""
+    kind, machine_id = (
+        ("printer", op.printer_id)
+        if op.printer_id is not None
+        else ("resource", op.resource_id)
+    )
+    return (
+        f"{kind}-{machine_id}"
+        f"|{_naive_utc(op.scheduled_start).isoformat()}"
+        f"|{_naive_utc(op.scheduled_end).isoformat()}"
+    )
+
+
 @router.get("/board")
 async def get_scheduler_board(
     start_date: datetime = Query(..., description="Window start (ISO 8601)"),
     end_date: datetime = Query(..., description="Window end (ISO 8601)"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_staff_user),
 ):
     """
     SCHED-5: One-call payload for the Scheduler (Gantt) view.
@@ -227,6 +249,8 @@ async def get_scheduler_board(
             "production_order_status": po.status if po else None,
             "product_name": po.product.name if po and po.product else None,
             "quantity": float(po.quantity_ordered) if po else None,
+            # S4: blocks sharing a group_key are one co-booked run.
+            "group_key": _block_group_key(op),
         }
 
     ops_by_lane: dict[str, list] = {}
@@ -273,12 +297,17 @@ async def get_scheduler_board(
     def _lane(kind: str, obj, work_center_code: Optional[str]) -> dict:
         key = f"{kind}-{obj.id}"
         lane_ops = ops_by_lane.get(key, [])
-        # Utilization = scheduled time clipped to the window / window length
-        busy_hours = 0.0
+        # Utilization = union of scheduled time clipped to the window / window
+        # length. Merged, not summed: operations co-booked into one block
+        # occupy the machine once (S4).
+        clipped: List[Tuple[datetime, datetime]] = []
         for op in lane_ops:
             clip_start = max(_naive_utc(op.scheduled_start), start_date)
             clip_end = min(_naive_utc(op.scheduled_end), end_date)
-            busy_hours += max(0.0, (clip_end - clip_start).total_seconds() / 3600)
+            if clip_end > clip_start:
+                clipped.append((clip_start, clip_end))
+        clipped.sort(key=lambda pair: pair[0])
+        busy_hours = _merged_hours(clipped)
         utilization = (busy_hours / window_hours * 100) if window_hours > 0 else 0.0
         return {
             "key": key,
@@ -375,7 +404,7 @@ def _op_unscheduled_block(op) -> dict:
 async def check_capacity(
     request: CapacityCheckRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_staff_user),
 ):
     """
     Check if a machine has capacity for a production order at a given time.
@@ -446,7 +475,7 @@ async def get_available_slots(
     duration_hours: float = Query(2.0, description="Required duration in hours"),
     is_printer: bool = Query(False, description="True if resource_id is a printer"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_staff_user),
 ):
     """
     Find available time slots for a machine within a date range.
@@ -503,7 +532,7 @@ async def get_machine_availability(
     end_date: datetime = Query(..., description="End date"),
     work_center_id: Optional[int] = Query(None, description="Filter by work center"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_staff_user),
 ):
     """
     Get availability status for all machines in a date range.
@@ -581,12 +610,13 @@ async def get_machine_availability(
 
 @router.post(
     "/auto-schedule",
-    # Auth runs FIRST so an anonymous request gets 401 (not authenticated) — it
-    # must not learn that this is a PRO-gated feature. FastAPI caches identical
-    # sub-dependencies per request, so the current_user param below does not
-    # re-execute get_current_user.
+    # Auth runs FIRST so an anonymous request gets 401 (not authenticated) and
+    # a customer gets 403 — neither may learn that this is a PRO-gated feature.
+    # The router-level staff gate already runs before this list; repeating it
+    # here keeps the order explicit. FastAPI caches identical sub-dependencies
+    # per request, so the current_user param below does not re-execute it.
     dependencies=[
-        Depends(get_current_user),
+        Depends(get_current_staff_user),
         Depends(require_feature("production_advanced")),
     ],
 )
@@ -595,7 +625,7 @@ async def auto_schedule_order(
     preferred_start: Optional[datetime] = Query(None, description="Preferred start time"),
     work_center_id: Optional[int] = Query(None, description="Preferred work center"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_staff_user),
 ):
     """
     Automatically find the best available slot for a production order.
@@ -792,8 +822,18 @@ async def get_resource_conflicts(
     start: str = Query(..., description="Start time (ISO 8601)"),
     end: str = Query(..., description="End time (ISO 8601)"),
     is_printer: bool = Query(False, description="True if resource is a printer"),
+    operation_id: Optional[int] = Query(
+        None,
+        description=(
+            "Operation being edited. It never conflicts with its own stored "
+            "slot and, when the proposed slot is the slot of the co-booked "
+            "block it belongs to, neither do its block siblings (derived "
+            "server-side from the stored window). Advisory: the reschedule "
+            "endpoint does the authoritative check."
+        ),
+    ),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_staff_user),
 ):
     """
     Check for scheduling conflicts on a resource/printer in a time range.
@@ -802,6 +842,11 @@ async def get_resource_conflicts(
     Returns list of conflicting operations with their PO codes and times,
     plus maintenance-window conflicts (SCHED-7) discriminated by
     ``type: "maintenance"`` (operations carry ``type: "operation"``).
+
+    Pass ``operation_id`` when editing an already-scheduled operation so the
+    check agrees with the reschedule endpoint. There is deliberately no
+    parameter for a list of ids to ignore. An unknown ``operation_id`` is
+    ignored (nothing is excluded).
     """
     from app.services.resource_scheduling import (
         find_conflicts,
@@ -818,12 +863,21 @@ async def get_resource_conflicts(
             detail="Invalid ISO 8601 timestamp for 'start' or 'end'"
         )
 
+    editing = db.get(ProductionOrderOperation, operation_id) if operation_id is not None else None
+    if editing is not None:
+        slot = resolve_edit_slot(db, editing, resource_id, start_time, end_time, is_printer)
+        start_time, end_time = slot.start_time, slot.end_time
+        exclude_ids = slot.exclude_ids
+    else:
+        exclude_ids = None
+
     conflicting_ops = find_conflicts(
         db=db,
         resource_id=resource_id,
         start_time=start_time,
         end_time=end_time,
         is_printer=is_printer,
+        exclude_operation_ids=exclude_ids,
     )
 
     conflicts = []

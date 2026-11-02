@@ -4,10 +4,11 @@
 # the repo across org transfers — no OAuth app approval / "set up project" step
 # (which is what broke after the move to the BLB3DPrinting org).
 #
-# Jobs mirror the CircleCI jobs 1:1, including the dependency graph. After this
-# lands, repoint branch protection's required checks from `ci/circleci: core-*`
-# to these Actions job names: core-diff, core-pro-guard, core-backend-static,
-# core-backend-tests, core-frontend-build, core-frontend-unit.
+# The original jobs mirror CircleCI, with release gates added alongside them.
+# After the release-gate pilot proves stable, require these Actions job names in
+# the main ruleset: core-diff, core-pro-guard, core-version-parity,
+# core-backend-static, core-backend-tests, core-frontend-build, and
+# core-frontend-unit.
 name: core-ci
 
 on:
@@ -23,11 +24,49 @@ permissions:
   contents: read
 
 jobs:
+  # Repository guardrails: immutable Actions, no local bypass guidance, and
+  # security workflows remain attached to pull requests.
+  core-guardrails:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - name: Test repository hardening
+        run: python -m unittest scripts.ci.test_guardrail_policy scripts.ci.test_workflow_hardening scripts.ci.test_audit_severity -v
+
+  # Dependency audit gate: high/critical findings block; unclassified findings
+  # fail closed rather than being silently ignored.
+  core-dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Audit Python dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --disable-pip-version-check pip-audit
+          set +e
+          python -m pip_audit --strict --requirement requirements.txt --format cyclonedx-json --output pip-audit.json
+          audit_exit=$?
+          set -e
+          if [ "$audit_exit" -gt 1 ]; then exit "$audit_exit"; fi
+          python ../scripts/ci/check_audit_severity.py pip pip-audit.json
+      - name: Audit JavaScript dependencies
+        working-directory: frontend
+        run: |
+          set +e
+          npm audit --json > npm-audit.json
+          audit_exit=$?
+          set -e
+          if [ "$audit_exit" -gt 1 ]; then exit "$audit_exit"; fi
+          python ../scripts/ci/check_audit_severity.py npm npm-audit.json
+
   # Whitespace / conflict-marker check against main (CircleCI: core-diff)
   core-diff:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -40,7 +79,7 @@ jobs:
   core-pro-guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -66,12 +105,25 @@ jobs:
           fi
           echo "No PRO code detected; public Core repo is clean."
 
+  # Release metadata guard: every runtime and lockfile must report one version.
+  core-version-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Test version parity guard
+        run: python -m unittest scripts.ci.test_check_version_parity
+      - name: Check repository version parity
+        run: python scripts/ci/check_version_parity.py
+
   # Backend syntax check (CircleCI: core-backend-static)
   core-backend-static:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
       - name: Compile backend Python files
@@ -107,8 +159,8 @@ jobs:
       DEBUG: "false"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
           cache: pip
@@ -125,7 +177,7 @@ jobs:
           python -m pytest -q --junitxml=../test-results/core-backend/pytest.xml
       - name: Upload backend test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: core-backend-test-results
           path: test-results/core-backend
@@ -136,14 +188,16 @@ jobs:
     runs-on: ubuntu-latest
     needs: [core-diff, core-pro-guard]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "lts/*"
+          node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
         run: cd frontend && npm ci
+      - name: Lint frontend
+        run: cd frontend && npm run lint:ci
       - name: Build frontend
         run: cd frontend && npm run build
         env:
@@ -154,10 +208,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [core-diff, core-pro-guard]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "lts/*"
+          node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
@@ -169,7 +223,7 @@ jobs:
           npm run test:unit -- --run --reporter=default --reporter=junit --outputFile=../test-results/core-frontend-unit/vitest.xml
       - name: Upload frontend unit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: core-frontend-unit-results
           path: test-results/core-frontend-unit

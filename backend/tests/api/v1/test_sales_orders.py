@@ -135,17 +135,21 @@ class TestSalesOrderAuth:
 
 class TestShippingEventsAuthorization:
     """Owner-or-admin guard on shipping-events (#872 CodeRabbit follow-up):
-    an authenticated non-owner must not read/write another customer's shipment
-    events, matching get_sales_order_details."""
+    an authenticated non-owner must not read/write another user's shipment
+    events, matching get_sales_order_details.
 
-    def _as_new_customer(self, client, db, suffix):
+    Customers are now stopped earlier by the router-level staff gate (they
+    have no Core sales-order access at all), so the owner-or-admin guard is
+    exercised here with an operator who does not own the order."""
+
+    def _as_new_user(self, client, db, suffix, account_type):
         from app.core.security import create_access_token
         from app.models.user import User
         other = User(
-            email=f"outsider-{suffix}@filaops.dev",
+            email=f"outsider-{account_type}-{suffix}@filaops.dev",
             password_hash="not-a-real-hash",
             first_name="Out", last_name="Sider",
-            account_type="customer",
+            account_type=account_type,
         )
         db.add(other)
         db.flush()
@@ -156,22 +160,42 @@ class TestShippingEventsAuthorization:
         product = make_product(selling_price=Decimal("10.00"))
         so = make_sales_order(product_id=product.id, quantity=1, unit_price=Decimal("10.00"))
         db.flush()  # order is owned by the seeded admin (user_id=1)
-        self._as_new_customer(client, db, f"list-{so.id}")
+        self._as_new_user(client, db, f"list-{so.id}", "operator")
 
         response = client.get(f"{BASE_URL}/{so.id}/shipping-events")
         assert response.status_code == 403
+        assert response.json()["detail"] == "Not authorized to view this order"
 
     def test_non_owner_cannot_add_shipping_event(self, client, db, make_product, make_sales_order):
         product = make_product(selling_price=Decimal("10.00"))
         so = make_sales_order(product_id=product.id, quantity=1, unit_price=Decimal("10.00"))
         db.flush()
-        self._as_new_customer(client, db, f"add-{so.id}")
+        self._as_new_user(client, db, f"add-{so.id}", "operator")
 
         response = client.post(
             f"{BASE_URL}/{so.id}/shipping-events",
             json={"event_type": "delivered", "title": "Delivered"},
         )
         assert response.status_code == 403
+        assert response.json()["detail"] == "Not authorized to modify this order"
+
+    def test_customer_cannot_list_or_add_shipping_events(self, client, db, make_product, make_sales_order):
+        """A customer is refused by the staff gate before any owner check."""
+        product = make_product(selling_price=Decimal("10.00"))
+        so = make_sales_order(product_id=product.id, quantity=1, unit_price=Decimal("10.00"))
+        db.flush()
+        self._as_new_user(client, db, f"cust-{so.id}", "customer")
+
+        response = client.get(f"{BASE_URL}/{so.id}/shipping-events")
+        assert response.status_code == 403
+        assert response.json()["detail"] == "Staff access required"
+
+        response = client.post(
+            f"{BASE_URL}/{so.id}/shipping-events",
+            json={"event_type": "delivered", "title": "Delivered"},
+        )
+        assert response.status_code == 403
+        assert response.json()["detail"] == "Staff access required"
 
     def test_admin_can_list_shipping_events(self, client, db, make_product, make_sales_order):
         """The default client is the seeded admin — the guard must not block it."""
@@ -621,6 +645,25 @@ class TestUpdateStatus:
         })
         assert response.status_code == 404
 
+    def test_cannot_cancel_via_status_update(self, client, db, make_sales_order, make_product):
+        """PATCH /status to 'cancelled' must be rejected — cancellation has to
+        go through POST /cancel so the reason + cancelled_at are recorded and
+        production orders / reservations are released (wi-005 bypass)."""
+        product = make_product(selling_price=Decimal("10.00"))
+        so = make_sales_order(product_id=product.id, status="confirmed")
+        db.flush()
+
+        response = client.patch(f"{BASE_URL}/{so.id}/status", json={
+            "status": "cancelled",
+        })
+        assert response.status_code == 400
+        assert "cancel" in response.json()["detail"].lower()
+
+        # The order is untouched — no silent terminal cancellation.
+        got = client.get(f"{BASE_URL}/{so.id}").json()
+        assert got["status"] == "confirmed"
+        assert got["cancelled_at"] is None
+
     def test_update_status_with_internal_notes(self, client, db, make_sales_order, make_product):
         product = make_product(selling_price=Decimal("10.00"))
         so = make_sales_order(product_id=product.id, status="pending")
@@ -864,13 +907,15 @@ class TestCancelSalesOrder:
         data = response.json()
         assert data["status"] == "cancelled"
 
-    def test_cancel_pending_payment_order(self, client, db, make_sales_order, make_product):
+    def test_cancel_pending_order(self, client, db, make_sales_order, make_product):
+        """Every newly created order is 'pending' — cancelling it must work
+        (regression: is_cancellable omitted 'pending', so this 400'd)."""
         product = make_product(selling_price=Decimal("10.00"))
-        so = make_sales_order(product_id=product.id, status="pending_payment")
+        so = make_sales_order(product_id=product.id, status="pending")
         db.flush()
 
         response = client.post(f"{BASE_URL}/{so.id}/cancel", json={
-            "cancellation_reason": "Payment issue",
+            "cancellation_reason": "Changed mind",
         })
         assert response.status_code == 200
         assert response.json()["status"] == "cancelled"

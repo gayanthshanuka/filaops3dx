@@ -16,7 +16,7 @@ from decimal import Decimal
 from typing import Optional
 
 from fastapi import HTTPException
-from sqlalchemy import desc
+from sqlalchemy import Integer, cast, desc, func, text
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 
@@ -75,32 +75,63 @@ from app.services.sales_order_production_service import (
 
 logger = get_logger(__name__)
 
+# Namespace for the transaction-scoped advisory lock that serializes sales
+# order number allocation; the second lock key is the year. Other namespaces
+# in use: 74001 payment numbers, 74002 journal entry numbers, 74003 shipment
+# guard, 74004 production completion guard.
+_ORDER_NUMBER_LOCK_NAMESPACE = 74005
+
 
 # =============================================================================
 # Code Generation Helpers
 # =============================================================================
 
-def generate_order_number(db: Session) -> str:
+def generate_order_number(db: Session, *, width: int = 3) -> str:
     """
-    Generate next sales order number (SO-2025-001, SO-2025-002, etc.)
-    Uses row-level locking to prevent race conditions.
+    Generate the next sales order number (SO-2026-001, SO-2026-002, ...).
+
+    Every sales order creation path allocates through this function, so they
+    all share one lock:
+
+    - A transaction-scoped Postgres advisory lock keyed on the year makes
+      concurrent callers wait until the holder's transaction commits or rolls
+      back. Unlike SELECT ... FOR UPDATE on existing rows, this also covers
+      the first order of a year, when there are no rows to lock. Callers must
+      insert the order in the same transaction, with no commit in between.
+    - The next number is the numeric max of the sequence part plus one, so
+      SO-2026-999 is followed by SO-2026-1000, and mixed widths such as
+      SO-2026-042 and SO-2026-0042 compare by value, not as text. Numbers
+      whose suffix is not all digits are ignored.
+
+    ``width`` is the minimum zero-padded width of the sequence part.
     """
     year = datetime.now(timezone.utc).year
-    last_order = (
-        db.query(SalesOrder)
-        .filter(SalesOrder.order_number.like(f"SO-{year}-%"))
-        .order_by(desc(SalesOrder.order_number))
-        .with_for_update()
-        .first()
+    prefix = f"SO-{year}-"
+
+    db.execute(
+        text(
+            """
+            SELECT pg_advisory_xact_lock(
+                CAST(:namespace AS integer),
+                CAST(:year AS integer)
+            )
+            """
+        ),
+        {"namespace": _ORDER_NUMBER_LOCK_NAMESPACE, "year": year},
     )
 
-    if last_order:
-        last_num = int(last_order.order_number.split("-")[2])
-        next_num = last_num + 1
-    else:
-        next_num = 1
+    sequence_value = cast(func.replace(SalesOrder.order_number, prefix, ""), Integer)
+    max_seq = (
+        db.query(func.max(sequence_value))
+        .filter(
+            SalesOrder.order_number.like(f"{prefix}%"),
+            SalesOrder.order_number.op("~")(rf"^SO-{year}-\d+$"),
+        )
+        .scalar()
+        or 0
+    )
 
-    return f"SO-{year}-{next_num:03d}"
+    return f"{prefix}{max_seq + 1:0{width}d}"
 
 
 # =============================================================================
@@ -857,6 +888,21 @@ def update_sales_order_status(
             ),
         )
 
+    # Cancellation must go through cancel_sales_order() so the reason and
+    # cancelled_at are recorded and linked production orders / material
+    # reservations are released. A bare status flip to 'cancelled' skipped the
+    # is_cancellable guard and all cleanup, leaving a terminal order with no
+    # audit trail and orphaned WOs/inventory.
+    if new_status == "cancelled":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Orders cannot be cancelled via status update. Use "
+                "POST /sales-orders/<order_id>/cancel so the reason is recorded "
+                "and production orders / reservations are released."
+            ),
+        )
+
     try:
         validate_sales_order_transition(old_status, new_status)
     except StatusTransitionError as exc:
@@ -1134,8 +1180,10 @@ def cancel_sales_order(
 
 EDITABLE_STATUSES = {"pending", "confirmed", "in_production", "on_hold"}
 CLOSE_SHORT_STATUSES = {"confirmed", "in_production", "ready_to_ship"}
-# Terminal PO statuses that allow SO close-short (includes legacy variants)
-RESOLVED_PO_STATUSES = {"complete", "completed", "closed", "cancelled"}
+# Terminal PO statuses that allow SO close-short (includes legacy variants).
+# "scrapped" is a finished order that made nothing: it keeps its sales-order
+# link, so it must not hold the sale open.
+RESOLVED_PO_STATUSES = {"complete", "completed", "closed", "cancelled", "scrapped"}
 
 
 def _recalculate_order_totals(db: Session, order: SalesOrder) -> None:
