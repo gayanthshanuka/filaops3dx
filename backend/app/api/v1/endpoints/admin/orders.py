@@ -42,9 +42,9 @@ async def download_order_import_template():
     Template format supports single-line orders (one product per order) or
     multi-line orders (multiple products per order using Order ID grouping).
     """
-    template = """Order ID,Order Date,Order Status,Payment Status,Customer Email,Customer Name,Product SKU,Quantity,Unit Price,Shipping Cost,Tax Amount,Shipping Address Line 1,Shipping City,Shipping State,Shipping Zip,Shipping Country,Customer Notes
-ORD-001,2025-01-15,pending,paid,customer@example.com,John Doe,PROD-001,2,19.99,5.00,2.00,123 Main St,New York,NY,10001,USA,Please handle with care
-ORD-002,2025-01-16,processing,paid,jane@example.com,Jane Smith,PROD-002,1,29.99,7.50,2.25,456 Oak Ave,Los Angeles,CA,90001,USA,"""
+    template = """Order ID,Order Date,Order Status,Payment Status,Customer Phone,Customer Email,Customer Name,Product SKU,Quantity,Unit Price,Shipping Cost,Tax Amount,Shipping Address Line 1,Shipping City,Shipping State,Shipping Zip,Shipping Country,Customer Notes
+ORD-001,2025-01-15,pending,paid,+94771234567,,John Doe,PROD-001,2,19.99,5.00,2.00,123 Main St,New York,NY,10001,USA,Please handle with care
+ORD-002,2025-01-16,processing,paid,+94712345678,jane@example.com,Jane Smith,PROD-002,1,29.99,7.50,2.25,456 Oak Ave,Los Angeles,CA,90001,USA,"""
 
     return StreamingResponse(
         io.BytesIO(template.encode("utf-8")),

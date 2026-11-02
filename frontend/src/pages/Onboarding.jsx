@@ -1042,8 +1042,8 @@ export default function Onboarding() {
                 />
                 <p className="text-xs mt-2"
                 style={{ color: 'var(--text-secondary)' }}>
-                  CSV should include: Email, First Name, Last Name, Company,
-                  Phone, Address fields
+                  Required: Phone. Optional: Email, First Name, Last Name,
+                  Company, Address fields.
                 </p>
               </div>
 
@@ -1127,8 +1127,8 @@ export default function Onboarding() {
                 />
                 <p className="text-xs mt-2"
                 style={{ color: 'var(--text-secondary)' }}>
-                  Required: Order ID, Customer Email, Product SKU, Quantity.
-                  Optional: Customer Name, Shipping Address, Unit Price, Shipping
+                  Required: Order ID, Customer Phone, Product SKU, Quantity.
+                  Optional: Customer Email, Customer Name, Shipping Address, Unit Price, Shipping
                   Cost, Tax Amount.
                 </p>
               </div>
