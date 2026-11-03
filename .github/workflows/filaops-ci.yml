@@ -112,5 +112,5 @@ jobs:
       - name: Build (development mode)
         run: npm run build
         env:
-          VITE_API_URL: "http://localhost:8001"
+          VITE_API_URL: "http://localhost:5432"
           # Note: Production builds are disabled - see frontend/PRODUCTION_BUILD_BLOCKED.md
