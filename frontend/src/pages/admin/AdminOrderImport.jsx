@@ -366,7 +366,7 @@ export default function AdminOrderImport() {
               <p className="font-medium text-white mb-1">Required Columns:</p>
               <ul className="list-disc list-inside space-y-1 ml-4">
                 <li><code className="bg-gray-800 px-2 py-1 rounded">Order ID</code> - Unique order identifier (for multi-line orders)</li>
-                <li><code className="bg-gray-800 px-2 py-1 rounded">Customer Email</code> - Customer email address</li>
+                <li><code className="bg-gray-800 px-2 py-1 rounded">Customer Phone</code> - Telephone number required for new customers</li>
                 <li><code className="bg-gray-800 px-2 py-1 rounded">Product SKU</code> - Product SKU to order</li>
                 <li><code className="bg-gray-800 px-2 py-1 rounded">Quantity</code> - Quantity ordered</li>
               </ul>
@@ -374,6 +374,7 @@ export default function AdminOrderImport() {
             <div>
               <p className="font-medium text-white mb-1">Optional Columns:</p>
               <ul className="list-disc list-inside space-y-1 ml-4">
+                <li><code className="bg-gray-800 px-2 py-1 rounded">Customer Email</code> - Optional contact email; can identify existing legacy customers</li>
                 <li><code className="bg-gray-800 px-2 py-1 rounded">Customer Name</code> - Customer full name</li>
                 <li><code className="bg-gray-800 px-2 py-1 rounded">Unit Price</code> - Price per unit (uses product price if not provided)</li>
                 <li><code className="bg-gray-800 px-2 py-1 rounded">Shipping Cost</code> - Shipping cost</li>
@@ -390,7 +391,7 @@ export default function AdminOrderImport() {
             </div>
             <div className="mt-2 p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
               <p className="text-green-400 text-xs">
-                <strong>Note:</strong> If "Create customers automatically" is enabled, new customers will be created for any email addresses that don't exist. 
+                <strong>Note:</strong> If "Create customers automatically" is enabled, new customers will be created for telephone numbers that don't exist.
                 Customers will be created with the shipping address from the order.
               </p>
             </div>

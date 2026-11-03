@@ -74,6 +74,31 @@ describe("QuoteFormModal editing", () => {
     vi.unstubAllGlobals();
   });
 
+  it("saves a new customer by telephone while creating a quote without email", async () => {
+    const onSave = vi.fn();
+    const defaultFetch = globalThis.fetch.getMockImplementation();
+    globalThis.fetch.mockImplementation((url, options) => {
+      if (String(url).includes("/api/v1/admin/customers") && options?.method === "POST") {
+        return Promise.resolve({ ok: true, json: async () => ({ id: 9, customer_number: "CUST-009" }) });
+      }
+      return defaultFetch(url, options);
+    });
+    renderModal({ quote: { ...quote, customer_email: "" }, onSave });
+
+    fireEvent.change(screen.getByLabelText("Customer Telephone"), {
+      target: { value: "+94 77 123 4567" },
+    });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Save as new customer record" }));
+    fireEvent.click(screen.getByRole("button", { name: "Update Quote" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      customer_id: 9,
+      customer_email: null,
+    })));
+    const createCall = globalThis.fetch.mock.calls.find(([, options]) => options?.method === "POST");
+    expect(JSON.parse(createCall[1].body)).toMatchObject({ phone: "+94 77 123 4567", email: null });
+  });
+
   it("submits edited line quantity and price for an existing manual quote", async () => {
     const onSave = vi.fn();
     renderModal({ onSave });

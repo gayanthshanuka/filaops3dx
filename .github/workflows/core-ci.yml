@@ -147,7 +147,7 @@ jobs:
       - name: Build frontend
         run: cd frontend && npm run build
         env:
-          VITE_API_URL: http://localhost:8001
+          VITE_API_URL: http://localhost:5432
 
   # Frontend unit tests (CircleCI: core-frontend-unit)
   core-frontend-unit:

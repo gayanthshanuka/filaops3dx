@@ -312,14 +312,14 @@ export default function CustomerDetailsModal({ customer, onClose, onEdit }) {
     <Modal
       isOpen={true}
       onClose={onClose}
-      title={customer.full_name || customer.email}
+      title={customer.full_name || customer.phone || customer.email || customer.customer_number}
       className="w-full max-w-3xl max-h-[90vh] overflow-auto"
     >
       {/* Header */}
       <div className="p-6 border-b border-gray-800 flex justify-between items-center">
           <div>
             <h2 className="text-xl font-bold text-white">
-              {customer.full_name || customer.email}
+              {customer.full_name || customer.phone || customer.email || customer.customer_number}
             </h2>
             {customer.customer_number && (
               <p className="text-gray-400 text-sm font-mono">
@@ -402,7 +402,7 @@ export default function CustomerDetailsModal({ customer, onClose, onEdit }) {
                 <div className="grid grid-cols-2 gap-4 text-sm">
                   <div>
                     <span className="text-gray-500">Email:</span>{" "}
-                    <span className="text-white">{customer.email}</span>
+                    <span className="text-white">{customer.email || "-"}</span>
                   </div>
                   <div>
                     <span className="text-gray-500">Phone:</span>{" "}

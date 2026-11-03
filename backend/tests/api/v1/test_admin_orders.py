@@ -5,6 +5,8 @@ Endpoints under test:
     GET  /api/v1/admin/orders/import/template
     POST /api/v1/admin/orders/import
 """
+import csv
+import hashlib
 import io
 from decimal import Decimal
 
@@ -20,8 +22,21 @@ BASE_URL = "/api/v1/admin/orders"
 # =============================================================================
 
 def _csv_upload(client, csv_text: str, *, filename: str = "orders.csv",
-                content_type: str = "text/csv", **query_params):
-    """POST a CSV string to the import endpoint."""
+                content_type: str = "text/csv", add_phone: bool = True, **query_params):
+    """POST CSV, supplying stable telephone fixtures unless deliberately omitted."""
+    if add_phone:
+        reader = csv.DictReader(io.StringIO(csv_text))
+        headers = reader.fieldnames or []
+        if headers and not any("phone" in header.lower() for header in headers):
+            output = io.StringIO()
+            writer = csv.DictWriter(output, fieldnames=[*headers, "Customer Phone"])
+            writer.writeheader()
+            for row in reader:
+                email = next((value for key, value in row.items() if "email" in key.lower() and value), "")
+                identity = email.lower() or str(row)
+                row["Customer Phone"] = "0" + str(int(hashlib.sha256(identity.encode()).hexdigest(), 16))[:11]
+                writer.writerow(row)
+            csv_text = output.getvalue()
     params = {k: str(v) for k, v in query_params.items()}
     return client.post(
         f"{BASE_URL}/import",
@@ -72,7 +87,7 @@ class TestOrderImportTemplate:
         response = client.get(f"{BASE_URL}/import/template")
         content = response.text
         expected_headers = [
-            "Order ID", "Order Date", "Customer Email", "Customer Name",
+            "Order ID", "Order Date", "Customer Phone", "Customer Email", "Customer Name",
             "Product SKU", "Quantity", "Unit Price", "Shipping Cost",
             "Tax Amount", "Shipping Address Line 1", "Shipping City",
             "Shipping State", "Shipping Zip", "Shipping Country",
@@ -83,9 +98,12 @@ class TestOrderImportTemplate:
 
     def test_template_includes_example_rows(self, client):
         response = client.get(f"{BASE_URL}/import/template")
-        content = response.text
-        assert "customer@example.com" in content
-        assert "ORD-001" in content
+        rows = list(csv.DictReader(io.StringIO(response.text)))
+        assert rows[0]["Order ID"] == "ORD-001"
+        assert rows[0]["Customer Phone"] == "+94771234567"
+        assert rows[0]["Customer Email"] == ""
+        assert rows[1]["Customer Phone"] == "+94712345678"
+        assert rows[1]["Customer Email"] == "jane@example.com"
 
 
 # =============================================================================
@@ -306,21 +324,42 @@ class TestOrderImportErrors:
         errors_text = str(data["errors"])
         assert "inactive" in errors_text.lower()
 
-    def test_missing_email_creates_placeholder(self, client, db, make_product):
-        """When email is missing, a placeholder email is generated and customer is created."""
+    def test_telephone_only_customer_has_no_placeholder_email(self, client, db, make_product):
+        """A telephone customer can place an imported order without an email."""
+        from app.models.user import User
+
         product = make_product(sku="CSV-NOEMAIL-001", selling_price=Decimal("10.00"))
         db.flush()
 
         csv_text = (
-            "Order ID,Customer Email,Product SKU,Quantity,Unit Price\n"
-            f"ORD-NOEMAIL,,{product.sku},1,10.00\n"
+            "Order ID,Customer Phone,Product SKU,Quantity,Unit Price\n"
+            f"ORD-NOEMAIL,+94771234567,{product.sku},1,10.00\n"
         )
         response = _csv_upload(client, csv_text)
 
         assert response.status_code == 200
         data = response.json()
-        # Placeholder email is generated; order should be created
         assert data["created"] == 1, f"Errors: {data.get('errors', [])}"
+        order = db.query(SalesOrder).filter(SalesOrder.source_order_id == "ORD-NOEMAIL").one()
+        customer = db.get(User, order.user_id)
+        assert customer.email is None
+        assert customer.phone == "+94771234567"
+
+    def test_new_customer_without_telephone_is_skipped(self, client, db, make_product):
+        product = make_product(sku="CSV-NOPHONE-001", selling_price=Decimal("10.00"))
+        db.flush()
+        csv_text = (
+            "Order ID,Customer Email,Product SKU,Quantity,Unit Price\n"
+            f"ORD-NOPHONE,no-phone@example.com,{product.sku},1,10.00\n"
+        )
+
+        response = _csv_upload(client, csv_text, add_phone=False)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["created"] == 0
+        assert data["skipped"] == 1
+        assert "Telephone number is required" in data["errors"][0]["error"]
 
     def test_missing_email_skipped_when_create_customers_false(self, client, db, make_product):
         product = make_product(sku="CSV-NOEML2-001", selling_price=Decimal("10.00"))
@@ -459,10 +498,7 @@ class TestOrderImportColumnVariations:
 
         assert response.status_code == 200
         data = response.json()
-        # Even if the exact aliases do not match, the row is processed
-        # (missing email falls back to placeholder, missing SKU is an error).
-        # We mainly assert no 500 error.
-        assert "total_rows" in data
+        assert data["created"] == 1, data
 
     def test_standard_aliases_email_and_sku(self, client, db, make_product):
         """'Email' and 'SKU' are valid column aliases."""

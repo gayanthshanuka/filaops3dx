@@ -720,7 +720,7 @@ class TestAuthRegisterOptionalFields:
         assert data["first_name"] == "Full"
         assert data["last_name"] == "User"
         assert data["company_name"] == "Test Corp"
-        assert data["phone"] == "555-1234"
+        assert data["phone"] == "5551234"
 
 
 # =============================================================================

@@ -14,7 +14,9 @@ Covers:
 - POST /api/v1/admin/customers/import (import customers from CSV)
 - Auth: 401 without token on key endpoints
 """
+import csv
 import io
+import csv
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -23,6 +25,24 @@ import pytest
 
 
 BASE_URL = "/api/v1/admin/customers"
+
+
+def _unique_phone():
+    return f"07{uuid.uuid4().int % 1000000000000:012d}"
+
+
+def _csv_with_phones(content):
+    """Supply independent telephone numbers for older email-focused CSV fixtures."""
+    rows = list(csv.DictReader(io.StringIO(content)))
+    if not rows:
+        return content
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=[*rows[0], "phone"])
+    writer.writeheader()
+    for row in rows:
+        row["phone"] = _unique_phone() if row.get("email") or row.get("billing_email") else ""
+        writer.writerow(row)
+    return output.getvalue()
 
 
 # =============================================================================
@@ -37,7 +57,7 @@ def _create_customer(client, **overrides):
         "first_name": "Test",
         "last_name": "Customer",
         "company_name": f"Test Co {uid}",
-        "phone": "555-0100",
+        "phone": _unique_phone(),
     }
     payload.update(overrides)
     response = client.post(BASE_URL, json=payload)
@@ -94,7 +114,7 @@ class TestCustomerAuth:
         csv_content = "email,first_name,last_name\ntest@example.com,John,Doe"
         response = unauthed_client.post(
             f"{BASE_URL}/import",
-            files={"file": ("customers.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+            files={"file": ("customers.csv", io.BytesIO(_csv_with_phones(csv_content).encode()), "text/csv")},
         )
         assert response.status_code == 401
 
@@ -107,14 +127,14 @@ class TestCreateCustomer:
     """Test customer creation endpoint."""
 
     def test_create_customer_minimal(self, client):
-        """Create a customer with only the required email field."""
-        uid = uuid.uuid4().hex[:8]
+        """Create a customer with only the required telephone number."""
         response = client.post(BASE_URL, json={
-            "email": f"minimal-{uid}@example.com",
+            "phone": "077 123 4567",
         })
         assert response.status_code == 201
         data = response.json()
-        assert data["email"] == f"minimal-{uid}@example.com"
+        assert data["email"] is None
+        assert data["phone"] == "0771234567"
         assert data["customer_number"].startswith("CUST-")
         assert data["status"] == "active"
         assert data["order_count"] == 0
@@ -149,7 +169,7 @@ class TestCreateCustomer:
         assert data["first_name"] == "Jane"
         assert data["last_name"] == "Doe"
         assert data["company_name"] == "Acme Corp"
-        assert data["phone"] == "555-1234"
+        assert data["phone"] == "5551234"
         assert data["billing_address_line1"] == "123 Main St"
         assert data["billing_city"] == "Springfield"
         assert data["shipping_address_line1"] == "456 Oak Ave"
@@ -176,17 +196,17 @@ class TestCreateCustomer:
         email = f"dup-{uid}@example.com"
         _create_customer(client, email=email)
 
-        response = client.post(BASE_URL, json={"email": email})
+        response = client.post(BASE_URL, json={"email": email, "phone": _unique_phone()})
         assert response.status_code == 400
         assert "already registered" in response.json()["detail"].lower()
 
     def test_create_customer_invalid_email(self, client):
         """Invalid email format returns 422."""
-        response = client.post(BASE_URL, json={"email": "not-an-email"})
+        response = client.post(BASE_URL, json={"email": "not-an-email", "phone": _unique_phone()})
         assert response.status_code == 422
 
-    def test_create_customer_missing_email(self, client):
-        """Missing required email returns 422."""
+    def test_create_customer_missing_phone(self, client):
+        """Missing required telephone returns 422."""
         response = client.post(BASE_URL, json={"first_name": "No Email"})
         assert response.status_code == 422
 
@@ -803,7 +823,7 @@ class TestUpdateCustomer:
         assert data["first_name"] == "Keep"
         assert data["last_name"] == "This"
         assert data["company_name"] == "Stable Corp"
-        assert data["phone"] == "555-9999"
+        assert data["phone"] == "5559999"
 
 
 # =============================================================================
@@ -941,7 +961,9 @@ class TestImportTemplate:
         response = client.get(f"{BASE_URL}/import/template")
         assert response.status_code == 200
         content = response.text
-        assert "john@example.com" in content
+        rows = list(csv.DictReader(io.StringIO(content)))
+        assert rows[0]["phone"] == "+94771234567"
+        assert rows[0]["email"] == ""
         assert "Acme Corp" in content
 
 
@@ -961,7 +983,7 @@ class TestImportPreview:
         )
         response = client.post(
             f"{BASE_URL}/import/preview",
-            files={"file": ("customers.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+            files={"file": ("customers.csv", io.BytesIO(_csv_with_phones(csv_content).encode()), "text/csv")},
         )
         assert response.status_code == 200
         data = response.json()
@@ -972,12 +994,12 @@ class TestImportPreview:
         assert data["rows"][0]["valid"] is True
         assert data["rows"][0]["data"]["email"] == f"preview-{uid}@example.com"
 
-    def test_preview_missing_email(self, client):
-        """Preview flags rows with missing email as errors."""
+    def test_preview_missing_phone(self, client):
+        """Preview flags rows with no telephone number as errors."""
         csv_content = "email,first_name\n,John\n"
         response = client.post(
             f"{BASE_URL}/import/preview",
-            files={"file": ("customers.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+            files={"file": ("customers.csv", io.BytesIO(_csv_with_phones(csv_content).encode()), "text/csv")},
         )
         assert response.status_code == 200
         data = response.json()
@@ -990,7 +1012,7 @@ class TestImportPreview:
         csv_content = "email,first_name\nnot-an-email,John\n"
         response = client.post(
             f"{BASE_URL}/import/preview",
-            files={"file": ("customers.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+            files={"file": ("customers.csv", io.BytesIO(_csv_with_phones(csv_content).encode()), "text/csv")},
         )
         assert response.status_code == 200
         data = response.json()
@@ -1008,7 +1030,7 @@ class TestImportPreview:
         )
         response = client.post(
             f"{BASE_URL}/import/preview",
-            files={"file": ("customers.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+            files={"file": ("customers.csv", io.BytesIO(_csv_with_phones(csv_content).encode()), "text/csv")},
         )
         assert response.status_code == 200
         data = response.json()
@@ -1025,7 +1047,7 @@ class TestImportPreview:
         csv_content = f"email,first_name\n{existing['email']},Existing\n"
         response = client.post(
             f"{BASE_URL}/import/preview",
-            files={"file": ("customers.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+            files={"file": ("customers.csv", io.BytesIO(_csv_with_phones(csv_content).encode()), "text/csv")},
         )
         assert response.status_code == 200
         data = response.json()
@@ -1048,7 +1070,7 @@ class TestImportPreview:
         csv_content = f"email,first_name,last_name\nformat-{uid}@example.com,A,B\n"
         response = client.post(
             f"{BASE_URL}/import/preview",
-            files={"file": ("customers.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+            files={"file": ("customers.csv", io.BytesIO(_csv_with_phones(csv_content).encode()), "text/csv")},
         )
         assert response.status_code == 200
         data = response.json()
@@ -1065,7 +1087,7 @@ class TestImportPreview:
         )
         response = client.post(
             f"{BASE_URL}/import/preview",
-            files={"file": ("customers.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+            files={"file": ("customers.csv", io.BytesIO(_csv_with_phones(csv_content).encode()), "text/csv")},
         )
         assert response.status_code == 200
         data = response.json()
@@ -1091,7 +1113,7 @@ class TestImportCustomers:
         )
         response = client.post(
             f"{BASE_URL}/import",
-            files={"file": ("customers.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+            files={"file": ("customers.csv", io.BytesIO(_csv_with_phones(csv_content).encode()), "text/csv")},
         )
         assert response.status_code == 200
         data = response.json()
@@ -1109,7 +1131,7 @@ class TestImportCustomers:
         )
         response = client.post(
             f"{BASE_URL}/import",
-            files={"file": ("customers.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+            files={"file": ("customers.csv", io.BytesIO(_csv_with_phones(csv_content).encode()), "text/csv")},
         )
         assert response.status_code == 200
         data = response.json()
@@ -1117,7 +1139,7 @@ class TestImportCustomers:
         assert data["skipped"] == 1
 
     def test_import_skips_invalid_emails(self, client):
-        """Import skips rows with missing or invalid email."""
+        """Import skips rows with missing telephone or invalid optional email."""
         uid = uuid.uuid4().hex[:8]
         csv_content = (
             "email,first_name\n"
@@ -1127,7 +1149,7 @@ class TestImportCustomers:
         )
         response = client.post(
             f"{BASE_URL}/import",
-            files={"file": ("customers.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+            files={"file": ("customers.csv", io.BytesIO(_csv_with_phones(csv_content).encode()), "text/csv")},
         )
         assert response.status_code == 200
         data = response.json()
@@ -1147,7 +1169,7 @@ class TestImportCustomers:
         csv_content = "email,first_name\n,Missing\n"
         response = client.post(
             f"{BASE_URL}/import",
-            files={"file": ("customers.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+            files={"file": ("customers.csv", io.BytesIO(_csv_with_phones(csv_content).encode()), "text/csv")},
         )
         assert response.status_code == 200
         data = response.json()
@@ -1162,7 +1184,7 @@ class TestImportCustomers:
         csv_content = f"email,first_name\nimported-{uid}@example.com,Numbered\n"
         response = client.post(
             f"{BASE_URL}/import",
-            files={"file": ("customers.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+            files={"file": ("customers.csv", io.BytesIO(_csv_with_phones(csv_content).encode()), "text/csv")},
         )
         assert response.status_code == 200
         assert response.json()["imported"] == 1
@@ -1181,7 +1203,7 @@ class TestImportCustomers:
         csv_content = f"email,first_name\nmsg-{uid}@example.com,Msg\n"
         response = client.post(
             f"{BASE_URL}/import",
-            files={"file": ("customers.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+            files={"file": ("customers.csv", io.BytesIO(_csv_with_phones(csv_content).encode()), "text/csv")},
         )
         assert response.status_code == 200
         data = response.json()
@@ -1197,7 +1219,7 @@ class TestImportCustomers:
         )
         response = client.post(
             f"{BASE_URL}/import",
-            files={"file": ("customers.csv", io.BytesIO(csv_content.encode()), "text/csv")},
+            files={"file": ("customers.csv", io.BytesIO(_csv_with_phones(csv_content).encode()), "text/csv")},
         )
         assert response.status_code == 200
         assert response.json()["imported"] == 1

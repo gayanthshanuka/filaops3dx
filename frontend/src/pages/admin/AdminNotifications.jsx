@@ -116,6 +116,7 @@ export default function AdminNotifications() {
   };
 
   const filteredCustomers = customers.filter(c => {
+    if (!c.email) return false;
     const q = customerSearch.toLowerCase();
     if (!q) return true;
     return (

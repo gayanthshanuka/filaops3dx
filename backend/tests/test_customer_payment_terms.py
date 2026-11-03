@@ -28,6 +28,7 @@ class TestCustomerPaymentTerms:
         """New customers without explicit terms default to COD."""
         resp = client.post("/api/v1/admin/customers/", json={
             "email": _unique_email(),
+            "phone": f"07{uuid.uuid4().int % 1000000000000:012d}",
             "first_name": "Default",
             "last_name": "Terms",
             "company_name": "DefaultCo",
@@ -45,6 +46,7 @@ class TestCustomerPaymentTerms:
         """Create a customer with net30 payment terms and credit limit."""
         resp = client.post("/api/v1/admin/customers/", json={
             "email": _unique_email(),
+            "phone": f"07{uuid.uuid4().int % 1000000000000:012d}",
             "first_name": "Net30",
             "last_name": "Customer",
             "company_name": "CreditCo",
@@ -65,6 +67,7 @@ class TestCustomerPaymentTerms:
         # Create with default
         create_resp = client.post("/api/v1/admin/customers/", json={
             "email": _unique_email(),
+            "phone": f"07{uuid.uuid4().int % 1000000000000:012d}",
             "first_name": "Update",
             "last_name": "Terms",
             "company_name": "UpdateCo",
@@ -90,6 +93,7 @@ class TestCustomerPaymentTerms:
         """Approving a customer for terms sets approved_for_terms_at and _by."""
         create_resp = client.post("/api/v1/admin/customers/", json={
             "email": _unique_email(),
+            "phone": f"07{uuid.uuid4().int % 1000000000000:012d}",
             "first_name": "Approve",
             "last_name": "Test",
             "company_name": "ApproveCo",
@@ -118,6 +122,7 @@ class TestCustomerPaymentTerms:
         # Create and approve
         create_resp = client.post("/api/v1/admin/customers/", json={
             "email": _unique_email(),
+            "phone": f"07{uuid.uuid4().int % 1000000000000:012d}",
             "first_name": "Revoke",
             "last_name": "Test",
             "company_name": "RevokeCo",
@@ -150,6 +155,7 @@ class TestCustomerPaymentTerms:
         """Setting net terms without approved_for_terms is rejected."""
         create_resp = client.post("/api/v1/admin/customers/", json={
             "email": _unique_email(),
+            "phone": f"07{uuid.uuid4().int % 1000000000000:012d}",
             "first_name": "Bypass",
             "last_name": "Test",
             "company_name": "BypassCo",
@@ -171,6 +177,7 @@ class TestCustomerPaymentTerms:
         email = _unique_email()
         create_resp = client.post("/api/v1/admin/customers/", json={
             "email": email,
+            "phone": f"07{uuid.uuid4().int % 1000000000000:012d}",
             "first_name": "List",
             "last_name": "Check",
             "company_name": "ListCo",

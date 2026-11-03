@@ -5,7 +5,7 @@
  */
 import { useState } from "react";
 import Modal from "../Modal";
-import { STATUS_OPTIONS, PAYMENT_TERMS_OPTIONS, formatPhoneNumber } from "./constants";
+import { STATUS_OPTIONS, PAYMENT_TERMS_OPTIONS } from "./constants";
 
 export default function CustomerModal({ customer, onSave, onClose }) {
   const [form, setForm] = useState({
@@ -35,6 +35,7 @@ export default function CustomerModal({ customer, onSave, onClose }) {
     approved_for_terms: customer?.approved_for_terms || false,
   });
   const [termsError, setTermsError] = useState("");
+  const phoneRequired = !customer || Boolean(customer.phone?.trim());
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -45,8 +46,13 @@ export default function CustomerModal({ customer, onSave, onClose }) {
     }
     const payload = {
       ...form,
+      phone: form.phone.trim(),
+      email: form.email.trim() || null,
       credit_limit: form.credit_limit === "" ? null : parseFloat(form.credit_limit),
     };
+    if (!phoneRequired && !payload.phone) {
+      delete payload.phone;
+    }
     onSave(payload);
   };
 
@@ -83,14 +89,17 @@ export default function CustomerModal({ customer, onSave, onClose }) {
             </h3>
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm text-gray-400 mb-1">
-                  Email *
+                <label htmlFor="customer-phone" className="block text-sm text-gray-400 mb-1">
+                  Telephone{phoneRequired ? " *" : " (optional for existing customer)"}
                 </label>
                 <input
-                  type="email"
-                  value={form.email}
-                  onChange={(e) => setForm({ ...form, email: e.target.value })}
-                  required
+                  type="tel"
+                  id="customer-phone"
+                  required={phoneRequired}
+                  autoComplete="tel"
+                  placeholder="+94 77 123 4567"
+                  value={form.phone}
+                  onChange={(e) => setForm({ ...form, phone: e.target.value })}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white"
                 />
               </div>
@@ -141,12 +150,12 @@ export default function CustomerModal({ customer, onSave, onClose }) {
               />
             </div>
             <div>
-              <label className="block text-sm text-gray-400 mb-1">Phone</label>
+              <label htmlFor="customer-email" className="block text-sm text-gray-400 mb-1">Email (optional)</label>
               <input
-                type="text"
-                value={form.phone}
-                onChange={(e) => setForm({ ...form, phone: formatPhoneNumber(e.target.value) })}
-                placeholder="(512) 555-9067"
+                id="customer-email"
+                type="email"
+                value={form.email}
+                onChange={(e) => setForm({ ...form, email: e.target.value })}
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white"
               />
             </div>

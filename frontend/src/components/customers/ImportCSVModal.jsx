@@ -174,7 +174,7 @@ export default function ImportCSVModal({ onClose, onImportComplete }) {
                   <span className="text-green-400">Etsy</span>, and generic CSV files.
                 </p>
                 <p className="text-xs text-gray-500 font-mono">
-                  Required: email • Optional: first_name, last_name, company, phone, address fields
+                  Required: phone • Optional: email, first_name, last_name, company, address fields
                 </p>
               </div>
 
@@ -235,7 +235,8 @@ export default function ImportCSVModal({ onClose, onImportComplete }) {
                       <tr>
                         <th className="text-left py-2 px-3 text-gray-400">Row</th>
                         <th className="text-left py-2 px-3 text-gray-400">Status</th>
-                        <th className="text-left py-2 px-3 text-gray-400">Email</th>
+                        <th className="text-left py-2 px-3 text-gray-400">Telephone</th>
+                        <th className="text-left py-2 px-3 text-gray-400">Email (optional)</th>
                         <th className="text-left py-2 px-3 text-gray-400">Name</th>
                         <th className="text-left py-2 px-3 text-gray-400">Company</th>
                         <th className="text-left py-2 px-3 text-gray-400">Errors</th>
@@ -255,7 +256,8 @@ export default function ImportCSVModal({ onClose, onImportComplete }) {
                               <span className="text-red-400">✗</span>
                             )}
                           </td>
-                          <td className="py-2 px-3 text-white">{row.data.email || "-"}</td>
+                          <td className="py-2 px-3 text-white">{row.data.phone || "-"}</td>
+                          <td className="py-2 px-3 text-gray-300">{row.data.email || "-"}</td>
                           <td className="py-2 px-3 text-gray-300">
                             {row.data.first_name} {row.data.last_name}
                           </td>

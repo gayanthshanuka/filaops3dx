@@ -1,7 +1,7 @@
 """
 User model for customer portal authentication
 """
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Numeric
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Numeric, CheckConstraint, Index
 from sqlalchemy.sql import text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -24,7 +24,7 @@ class User(Base):
     customer_number = Column(String(20), nullable=True, index=True)  # CUST-001, CUST-002
 
     # Authentication
-    email = Column(String(255), unique=True, nullable=False, index=True)
+    email = Column(String(255), unique=True, nullable=True, index=True)
     password_hash = Column(String(255), nullable=False)
     email_verified = Column(Boolean, default=False, nullable=False)
 
@@ -33,6 +33,16 @@ class User(Base):
     last_name = Column(String(100), nullable=True)
     company_name = Column(String(200), nullable=True)
     phone = Column(String(20), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("account_type = 'customer' OR email IS NOT NULL", name="ck_users_staff_email"),
+        Index(
+            "uq_users_customer_phone",
+            func.regexp_replace(phone, "[^0-9]", "", "g"),
+            unique=True,
+            postgresql_where=text("account_type = 'customer' AND regexp_replace(phone, '[^0-9]', '', 'g') <> ''"),
+        ),
+    )
 
     # Billing Address
     billing_address_line1 = Column(String(255), nullable=True)
@@ -92,7 +102,8 @@ class User(Base):
             return self.first_name
         elif self.last_name:
             return self.last_name
-        return self.email
+        phone = self.phone if self.account_type == "customer" else None
+        return phone or self.email or self.customer_number or str(self.id)
 
     @property
     def is_active(self) -> bool:

@@ -168,7 +168,7 @@ jobs:
           name: Build frontend
           command: cd frontend && npm run build
           environment:
-            VITE_API_URL: http://localhost:8001
+            VITE_API_URL: http://localhost:5432
 
   core-frontend-unit:
     executor: node

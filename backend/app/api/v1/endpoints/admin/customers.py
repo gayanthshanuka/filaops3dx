@@ -206,14 +206,14 @@ async def download_customer_template(
     current_admin: User = Depends(get_current_admin_user),
 ):
     """
-    Download a CSV template for customer import.
+    Download a CSV template. Phone is required; email is optional.
     """
     headers = [
+        "phone",
         "email",
         "first_name",
         "last_name",
         "company_name",
-        "phone",
         "billing_address_line1",
         "billing_address_line2",
         "billing_city",
@@ -229,11 +229,11 @@ async def download_customer_template(
     ]
 
     example = [
-        "john@example.com",
+        "+94771234567",
+        "",
         "John",
         "Smith",
         "Acme Corp",
-        "555-123-4567",
         "123 Main St",
         "Suite 100",
         "Springfield",
@@ -305,7 +305,7 @@ async def import_customers(
     Supports exports from Shopify, WooCommerce, Squarespace, Etsy, TikTok Shop, and generic CSV.
     Automatically maps common column names to our standard fields.
 
-    Skips rows with errors (duplicate emails, missing required fields).
+    Phone is required; email is optional. Skips invalid or duplicate contacts.
     Returns count of imported vs skipped.
     """
     if not file.filename.endswith('.csv'):

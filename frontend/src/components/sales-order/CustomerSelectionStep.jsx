@@ -40,7 +40,8 @@ export default function CustomerSelectionStep({
             {customers.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.customer_number || `#${c.id}`} -{" "}
-                {c.full_name || c.name || c.email}{" "}
+                {c.full_name || c.name || c.phone || c.email}{" "}
+                {c.phone && (c.full_name || c.name) ? `— ${c.phone} ` : ""}
                 {c.company_name ? `(${c.company_name})` : ""}
               </option>
             ))}
@@ -57,7 +58,7 @@ export default function CustomerSelectionStep({
       {selectedCustomer && (
         <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
           <div className="text-white font-medium">
-            {selectedCustomer.name}
+            {selectedCustomer.full_name || selectedCustomer.name || selectedCustomer.customer_number}
           </div>
           {selectedCustomer.company && (
             <div className="text-gray-400 text-sm">
@@ -65,11 +66,11 @@ export default function CustomerSelectionStep({
             </div>
           )}
           <div className="text-gray-400 text-sm">
-            {selectedCustomer.email}
+            {selectedCustomer.phone || selectedCustomer.email}
           </div>
-          {selectedCustomer.phone && (
+          {selectedCustomer.phone && selectedCustomer.email && (
             <div className="text-gray-400 text-sm">
-              {selectedCustomer.phone}
+              {selectedCustomer.email}
             </div>
           )}
         </div>

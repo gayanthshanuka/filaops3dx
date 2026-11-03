@@ -10,11 +10,14 @@ import io
 import secrets
 from datetime import datetime, timezone
 
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from app.core.customer_contact import phone_key
 from app.core.security import hash_password
 from app.logging_config import get_logger
 from app.models.user import User
+from app.schemas.customer import CustomerCreate
 
 logger = get_logger(__name__)
 
@@ -309,6 +312,55 @@ def _detect_csv_format(headers: list[str]) -> str:
 # CSV Import Operations
 # =============================================================================
 
+def _existing_contacts(db: Session) -> tuple[set[str], set[str]]:
+    emails = {email.lower() for (email,) in db.query(User.email).all() if email}
+    phones = {
+        phone_key(phone)
+        for (phone,) in db.query(User.phone).filter(User.account_type == "customer").all()
+        if phone
+    }
+    return emails, phones
+
+
+def _validate_import_row(
+    raw_row: dict, existing_emails: set[str], existing_phones: set[str],
+    seen_emails: set[str], seen_phones: set[str],
+) -> tuple[dict, list[str]]:
+    """Apply the same contact validation to preview and import."""
+    mapped_data = map_row_to_fields(raw_row)
+    mapped_data["email"] = mapped_data["email"].lower().strip() or None
+    errors = []
+    try:
+        customer = CustomerCreate.model_validate({
+            field: value or None for field, value in mapped_data.items()
+        })
+        mapped_data["phone"] = customer.phone
+        mapped_data["email"] = str(customer.email) if customer.email else None
+    except ValidationError as exc:
+        for error in exc.errors():
+            field = str(error["loc"][0])
+            if field == "phone":
+                errors.append("A valid phone number is required (7–15 digits)")
+            elif field == "email":
+                errors.append("Invalid email format")
+            else:
+                errors.append(f"{field}: {error['msg']}")
+
+    email = mapped_data["email"]
+    key = phone_key(mapped_data["phone"])
+    if key in existing_phones:
+        errors.append("Phone number already exists in database")
+    elif key in seen_phones:
+        errors.append("Duplicate phone number in CSV")
+    if email:
+        if email in existing_emails:
+            errors.append("Email already exists in database")
+        elif email in seen_emails:
+            errors.append("Duplicate email in CSV")
+
+    return mapped_data, errors
+
+
 def preview_customer_import(db: Session, text: str) -> dict:
     """
     Parse CSV text and validate rows against the database.
@@ -320,29 +372,19 @@ def preview_customer_import(db: Session, text: str) -> dict:
     headers = reader.fieldnames or []
     detected_format = _detect_csv_format(headers)
 
-    existing_emails = set(
-        e[0].lower() for e in db.query(User.email).all()
-    )
+    existing_emails, existing_phones = _existing_contacts(db)
     seen_emails: set[str] = set()
+    seen_phones: set[str] = set()
 
     rows = []
     for i, raw_row in enumerate(reader, start=2):  # Header is row 1
-        row_errors = []
-        mapped_data = map_row_to_fields(raw_row)
-
-        email = mapped_data.get("email", "").lower().strip()
-        if not email:
-            row_errors.append("Email is required")
-        elif "@" not in email:
-            row_errors.append("Invalid email format")
-        elif email in existing_emails:
-            row_errors.append("Email already exists in database")
-        elif email in seen_emails:
-            row_errors.append("Duplicate email in CSV")
-        else:
-            seen_emails.add(email)
-
-        mapped_data["email"] = email
+        mapped_data, row_errors = _validate_import_row(
+            raw_row, existing_emails, existing_phones, seen_emails, seen_phones,
+        )
+        if not row_errors:
+            seen_phones.add(phone_key(mapped_data["phone"]))
+            if mapped_data["email"]:
+                seen_emails.add(mapped_data["email"])
 
         rows.append({
             "row_number": i,
@@ -367,35 +409,31 @@ def import_customers(db: Session, text: str, admin_id: int) -> dict:
     """
     Import customers from decoded CSV text.
 
-    Skips rows with invalid/duplicate emails. Returns counts of imported
+    Requires a unique phone number; email is optional. Returns counts of imported
     vs skipped and the first 20 error details.
     """
     from app.services.customer_service import generate_customer_number
 
     reader = csv.DictReader(io.StringIO(text))
 
-    existing_emails = set(
-        e[0].lower() for e in db.query(User.email).all()
-    )
+    existing_emails, existing_phones = _existing_contacts(db)
+    seen_emails: set[str] = set()
+    seen_phones: set[str] = set()
 
     imported = 0
     skipped = 0
     errors = []
 
     for i, raw_row in enumerate(reader, start=2):
-        mapped_data = map_row_to_fields(raw_row)
-        email = mapped_data.get("email", "").lower().strip()
-
-        if not email or "@" not in email:
+        mapped_data, row_errors = _validate_import_row(
+            raw_row, existing_emails, existing_phones, seen_emails, seen_phones,
+        )
+        if row_errors:
             skipped += 1
-            errors.append({"row": i, "reason": "Invalid or missing email"})
+            errors.append({"row": i, "reason": "; ".join(row_errors)})
             continue
 
-        if email in existing_emails:
-            skipped += 1
-            errors.append({"row": i, "reason": f"Email {email} already exists"})
-            continue
-
+        email = mapped_data["email"]
         customer_number = generate_customer_number(db)
         now = datetime.now(timezone.utc)
 
@@ -428,15 +466,16 @@ def import_customers(db: Session, text: str, admin_id: int) -> dict:
         )
 
         try:
-            savepoint = db.begin_nested()
-            db.add(customer)
-            db.flush()
-            existing_emails.add(email)
+            with db.begin_nested():
+                db.add(customer)
+                db.flush()
+            seen_phones.add(phone_key(customer.phone))
+            if email:
+                seen_emails.add(email)
             imported += 1
-        except Exception as e:
-            savepoint.rollback()
+        except Exception:
             skipped += 1
-            errors.append({"row": i, "reason": f"Database error: {str(e)}", "email": email})
+            errors.append({"row": i, "reason": "Customer could not be saved; check for duplicate contact details"})
             continue
 
     db.commit()

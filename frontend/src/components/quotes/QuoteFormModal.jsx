@@ -83,6 +83,7 @@ export default function QuoteFormModal({ quote, onSave, onClose }) {
     customer_id: quote?.customer_id || null,
     customer_name: quote?.customer_name || "",
     customer_email: quote?.customer_email || "",
+    customer_phone: "",
     customer_notes: quote?.customer_notes || "",
     admin_notes: quote?.admin_notes || "",
     apply_tax: quote?.tax_rate ? true : null,
@@ -273,8 +274,9 @@ export default function QuoteFormModal({ quote, onSave, onClose }) {
         setForm((f) => ({
           ...f,
           customer_id: customerId,
-          customer_name: `${customer.first_name || ""} ${customer.last_name || ""}`.trim() || customer.email,
+          customer_name: `${customer.first_name || ""} ${customer.last_name || ""}`.trim() || customer.company_name || customer.phone || customer.email,
           customer_email: customer.email || "",
+          customer_phone: customer.phone || "",
         }));
       }
     } else {
@@ -301,8 +303,8 @@ export default function QuoteFormModal({ quote, onSave, onClose }) {
       }
     }
 
-    if (saveAsCustomer && !form.customer_email) {
-      toast.error("Customer email is required to save as new customer");
+    if (saveAsCustomer && !form.customer_id && !form.customer_phone.trim()) {
+      toast.error("Customer telephone is required to save as new customer");
       return;
     }
 
@@ -310,7 +312,7 @@ export default function QuoteFormModal({ quote, onSave, onClose }) {
 
     // Create customer if needed
     let customerId = form.customer_id;
-    if (saveAsCustomer && !customerId && form.customer_email) {
+    if (saveAsCustomer && !customerId) {
       try {
         const nameParts = (form.customer_name || "").trim().split(" ");
         const firstName = nameParts[0] || "";
@@ -321,7 +323,8 @@ export default function QuoteFormModal({ quote, onSave, onClose }) {
           credentials: "include",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            email: form.customer_email,
+            email: form.customer_email.trim() || null,
+            phone: form.customer_phone.trim(),
             first_name: firstName || null,
             last_name: lastName || null,
           }),
@@ -333,12 +336,15 @@ export default function QuoteFormModal({ quote, onSave, onClose }) {
           toast.success(`Customer ${newCustomer.customer_number} created`);
         } else {
           const err = await customerRes.json();
-          if (err.detail?.includes("already exists")) {
-            toast.info("Customer already exists, linking to quote");
-          }
+          toast.error(typeof err.detail === "string" ? err.detail : "Could not save customer. Check telephone and email.");
+          setSaving(false);
+          return;
         }
       } catch (err) {
         console.error("Failed to create customer:", err);
+        toast.error("Could not save customer. Please try again.");
+        setSaving(false);
+        return;
       }
     }
 
@@ -753,7 +759,7 @@ export default function QuoteFormModal({ quote, onSave, onClose }) {
                       <option value="">-- Enter customer manually --</option>
                       {customers.map((c) => (
                         <option key={c.id} value={c.id}>
-                          {c.first_name} {c.last_name} ({c.email})
+                          {c.full_name || `${c.first_name || ""} ${c.last_name || ""}`.trim() || c.company_name || c.customer_number} ({c.phone || c.email || "No telephone"})
                         </option>
                       ))}
                     </select>
@@ -780,7 +786,19 @@ export default function QuoteFormModal({ quote, onSave, onClose }) {
                     />
                   </div>
                   <div>
-                    <label className="block text-sm text-gray-400 mb-1">Customer Email</label>
+                    <label htmlFor="quote-customer-phone" className="block text-sm text-gray-400 mb-1">Customer Telephone</label>
+                    <input
+                      id="quote-customer-phone"
+                      type="tel"
+                      autoComplete="tel"
+                      value={form.customer_phone}
+                      onChange={(e) => setForm((f) => ({ ...f, customer_phone: e.target.value }))}
+                      placeholder="+94 77 123 4567"
+                      className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-1">Customer Email (optional)</label>
                     <input
                       type="email"
                       value={form.customer_email}
@@ -790,7 +808,7 @@ export default function QuoteFormModal({ quote, onSave, onClose }) {
                   </div>
                 </div>
 
-                {!form.customer_id && form.customer_email && (
+                {!form.customer_id && (
                   <div className="mt-3">
                     <label className="flex items-center gap-2 cursor-pointer">
                       <input

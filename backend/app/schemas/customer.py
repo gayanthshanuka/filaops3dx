@@ -6,7 +6,8 @@ For admin management of customers (users with account_type='customer')
 from decimal import Decimal
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, EmailStr, model_validator
+from pydantic import BaseModel, Field, EmailStr, model_validator, field_validator
+from app.core.customer_contact import normalize_phone
 from datetime import datetime
 
 VALID_PAYMENT_TERMS = Literal["cod", "prepay", "net15", "net30", "net60", "card_on_file"]
@@ -19,7 +20,7 @@ NET_TERMS = {"net15", "net30", "net60"}
 
 class CustomerBase(BaseModel):
     """Base customer fields"""
-    email: EmailStr
+    email: Optional[EmailStr] = None
     first_name: Optional[str] = Field(None, max_length=100)
     last_name: Optional[str] = Field(None, max_length=100)
     company_name: Optional[str] = Field(None, max_length=200)
@@ -48,7 +49,18 @@ class CustomerCreate(CustomerBase):
     Note: Customer portal login is a Pro feature. In open source,
     customers are CRM records for order management only.
     """
+    phone: str = Field(..., max_length=40)
     status: Optional[str] = Field("active")
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def validate_phone(cls, value):
+        return normalize_phone(value)
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def optional_email(cls, value):
+        return value.strip() or None if isinstance(value, str) else value
 
     # Payment Terms
     payment_terms: Optional[VALID_PAYMENT_TERMS] = "cod"
@@ -62,7 +74,17 @@ class CustomerUpdate(BaseModel):
     first_name: Optional[str] = Field(None, max_length=100)
     last_name: Optional[str] = Field(None, max_length=100)
     company_name: Optional[str] = Field(None, max_length=200)
-    phone: Optional[str] = Field(None, max_length=20)
+    phone: Optional[str] = Field(None, max_length=40)
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def validate_phone(cls, value):
+        return normalize_phone(value)
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def optional_email(cls, value):
+        return value.strip() or None if isinstance(value, str) else value
     status: Optional[str] = None  # active, inactive, suspended
 
     # Billing Address
@@ -99,7 +121,7 @@ class CustomerListResponse(BaseModel):
     """Customer list item (summary)"""
     id: int
     customer_number: Optional[str] = None
-    email: str
+    email: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     company_name: Optional[str] = None
@@ -170,7 +192,8 @@ class CustomerSearchResult(BaseModel):
     """Lightweight customer search result for dropdowns"""
     id: int
     customer_number: Optional[str] = None
-    email: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
     full_name: Optional[str] = None
     company_name: Optional[str] = None
 

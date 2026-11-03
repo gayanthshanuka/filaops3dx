@@ -15,11 +15,14 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core.customer_contact import normalize_phone, phone_key
 from app.models.product import Product
 from app.models.sales_order import SalesOrder, SalesOrderLine
 from app.models.user import User
+from app.schemas.customer import CustomerCreate
 
 
 # ============================================================================
@@ -46,24 +49,43 @@ def find_product_by_sku(db: Session, sku: str) -> Optional[Product]:
 
 def find_or_create_customer(
     db: Session,
-    email: str,
+    email: str | None,
     name: str = None,
     shipping_address: dict = None,
+    *,
+    create: bool = True,
 ) -> Optional[User]:
-    """Find existing customer by email or create new one."""
-    if not email or "@" not in email:
-        return None
-
-    email_lower = email.lower().strip()
-
-    customer = db.query(User).filter(User.email.ilike(email_lower)).first()
-    if customer:
-        return customer
-
-    # Normalize so the address .get() calls below are safe even when no
-    # shipping_address was supplied (the signature defaults it to None, and a
-    # couple of the country fields below dereference it unguarded).
+    """Find customers by telephone first; retain email lookup for legacy records."""
     shipping_address = shipping_address or {}
+    phone = normalize_phone(shipping_address["phone"]) if shipping_address.get("phone") else None
+    email_lower = (email or "").lower().strip() or None
+    contact = CustomerCreate(phone=phone, email=email_lower) if phone else None
+    by_phone = None
+    if phone:
+        by_phone = db.query(User).filter(
+            User.account_type == "customer",
+            func.regexp_replace(User.phone, "[^0-9]", "", "g") == phone_key(phone),
+        ).first()
+    by_email = None
+    if email_lower:
+        by_email = db.query(User).filter(
+            User.account_type == "customer", func.lower(User.email) == email_lower,
+        ).first()
+    if by_phone and by_email and by_phone.id != by_email.id:
+        raise ValueError("Telephone number and email belong to different customers")
+    if by_phone:
+        return by_phone
+    if by_email:
+        if phone and by_email.phone and phone_key(by_email.phone) != phone_key(phone):
+            raise ValueError("Telephone number does not match the customer registered with this email")
+        if phone and not by_email.phone and create:
+            by_email.phone = phone
+            db.flush()
+        return by_email
+    if not create:
+        return None
+    if not phone:
+        raise ValueError("Telephone number is required to create a customer")
 
     first_name = ""
     last_name = ""
@@ -82,12 +104,12 @@ def find_or_create_customer(
     now = datetime.now(timezone.utc)
     customer = User(
         customer_number=customer_number,
-        email=email_lower,
+        email=str(contact.email) if contact.email else None,
         password_hash="!import-created-no-password",  # unusable hash; customer must reset password
         first_name=first_name or None,
         last_name=last_name or None,
         company_name=shipping_address.get("company") if shipping_address else None,
-        phone=shipping_address.get("phone") if shipping_address else None,
+        phone=contact.phone,
         status="active",
         account_type="customer",
         email_verified=False,
@@ -122,6 +144,7 @@ ORDER_ID_COLS = ["order id", "Order ID", "order_id", "Order_ID", "Order Number",
 SHOPIFY_ORDER_ID_COLS = ["Name", "name"]
 ORDER_DATE_COLS = ["order date", "Order Date", "order_date", "Date", "date", "Order Date/Time"]
 CUSTOMER_EMAIL_COLS = ["customer email", "Customer Email", "customer_email", "Email", "email", "Buyer Email", "buyer_email"]
+CUSTOMER_PHONE_COLS = ["customer phone", "Customer Phone", "customer_phone", "Phone", "phone", "Telephone", "telephone", "Shipping Phone", "shipping_phone", "billing_phone"]
 # Bare "Name"/"name" intentionally excluded: Shopify uses it for the order
 # number, so consuming it as the customer name corrupted order-id grouping and
 # source_order_id dedup (#786). Specific name headers are kept.
@@ -209,8 +232,6 @@ def import_orders_from_csv(
             external_order_id = _find_col(row, order_id_cols) or None
             order_id = external_order_id or f"IMPORT-{row_num}"
             customer_email = _find_col(row, CUSTOMER_EMAIL_COLS).lower()
-            if not customer_email or "@" not in customer_email:
-                customer_email = f"import-{order_id.lower().replace(' ', '-')}@placeholder.local"
 
             product_sku = _find_col(row, PRODUCT_SKU_COLS)
             if not product_sku:
@@ -267,6 +288,7 @@ def import_orders_from_csv(
                 ("state", SHIP_STATE_COLS),
                 ("zip", SHIP_ZIP_COLS),
                 ("country", SHIP_COUNTRY_COLS),
+                ("phone", CUSTOMER_PHONE_COLS),
             ]:
                 val = _find_col(row, cols)
                 if val:
@@ -299,24 +321,16 @@ def import_orders_from_csv(
     # Process each order
     for order_id, order_data in orders_dict.items():
         try:
-            customer = None
-            if create_customers:
-                customer = find_or_create_customer(
-                    db,
-                    order_data["customer_email"],
-                    order_data["customer_name"],
-                    order_data["shipping_address"],
-                )
-            else:
-                customer = db.query(User).filter(
-                    User.email.ilike(order_data["customer_email"])
-                ).first()
+            customer = find_or_create_customer(
+                db,
+                order_data["customer_email"],
+                order_data["customer_name"],
+                order_data["shipping_address"],
+                create=create_customers,
+            )
 
             if not customer:
-                if "@placeholder.local" in order_data["customer_email"] and not create_customers:
-                    errors.append({"order_id": order_id, "error": "Customer email missing and create_customers=false - order skipped"})
-                else:
-                    errors.append({"order_id": order_id, "error": f"Customer not found: {order_data['customer_email']} (set create_customers=true to auto-create)"})
+                errors.append({"order_id": order_id, "error": "Customer not found by telephone or email (set create_customers=true to auto-create)"})
                 skipped += 1
                 continue
 
@@ -431,9 +445,13 @@ def import_orders_from_csv(
             db.commit()
             created += 1
 
-        except Exception as e:
+        except ValueError as exc:
             db.rollback()
-            errors.append({"order_id": order_id, "error": str(e)})
+            errors.append({"order_id": order_id, "error": str(exc)})
+            skipped += 1
+        except Exception:
+            db.rollback()
+            errors.append({"order_id": order_id, "error": "Order could not be imported; check customer contact details and order data"})
             skipped += 1
 
     return {"total_rows": total_rows, "created": created, "skipped": skipped, "errors": errors}

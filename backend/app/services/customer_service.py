@@ -21,6 +21,7 @@ from app.models.quote import Quote
 from app.models.sales_order import SalesOrder
 from app.models.user import User
 from app.schemas.customer import CustomerCreate, CustomerUpdate
+from app.services.customer_contact import ensure_contact_available, commit_customer, phone_search
 
 logger = get_logger(__name__)
 
@@ -339,7 +340,7 @@ def list_customers(
             | (User.last_name.ilike(term, escape="\\"))
             | (User.company_name.ilike(term, escape="\\"))
             | (User.customer_number.ilike(term, escape="\\"))
-            | (User.phone.ilike(term, escape="\\"))
+            | phone_search(search)
         )
 
     query = query.order_by(desc(User.created_at))
@@ -388,7 +389,7 @@ def search_customers(
     """
     Finds active customers matching the query for use in dropdowns or autocomplete.
     
-    Matches the query case-insensitively against email, first name, last name, company name, and customer number.
+    Matches telephone (ignoring punctuation), email, name, company, and customer number.
     
     Returns:
         A list of dictionaries for matching customers. Each dictionary contains:
@@ -408,7 +409,8 @@ def search_customers(
             | (User.first_name.ilike(term, escape="\\"))
             | (User.last_name.ilike(term, escape="\\"))
             | (User.company_name.ilike(term, escape="\\"))
-            | (User.customer_number.ilike(term, escape="\\")),
+            | (User.customer_number.ilike(term, escape="\\"))
+            | phone_search(query),
         )
         .order_by(User.last_name, User.first_name)
         .limit(limit)
@@ -420,6 +422,7 @@ def search_customers(
             "id": c.id,
             "customer_number": c.customer_number,
             "email": c.email,
+            "phone": c.phone,
             "full_name": _build_full_name(c),
             "company_name": c.company_name,
         }
@@ -449,9 +452,7 @@ def create_customer(
     Generates a customer number and random unusable password (portal login
     is a Pro feature; in open source, customers are CRM records only).
     """
-    existing = db.query(User).filter(User.email == data.email).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
+    ensure_contact_available(db, phone=data.phone, email=data.email)
 
     customer_number = generate_customer_number(db)
     now = datetime.now(timezone.utc)
@@ -490,7 +491,7 @@ def create_customer(
     )
 
     db.add(customer)
-    db.commit()
+    commit_customer(db)
     db.refresh(customer)
 
     return _customer_response(customer, {
@@ -516,14 +517,12 @@ def update_customer(
     """
     customer = _get_customer_or_404(db, customer_id)
 
-    # Check for duplicate email if changing
-    if data.email and data.email != customer.email:
-        existing = db.query(User).filter(User.email == data.email).first()
-        if existing:
-            raise HTTPException(status_code=400, detail="Email already in use")
+    if "email" in data.model_fields_set and not data.email and not (data.phone or customer.phone):
+        raise HTTPException(status_code=400, detail="Add a telephone number before removing the customer's email")
+    ensure_contact_available(db, phone=data.phone, email=data.email, exclude_id=customer_id)
 
     # Fields that can be explicitly set to NULL via PATCH
-    clearable_fields = {"credit_limit", "approved_for_terms"}
+    clearable_fields = {"credit_limit", "approved_for_terms", "email"}
     # Audit fields managed by server logic, never set directly from client
     audit_fields = {"approved_for_terms_at", "approved_for_terms_by"}
 
@@ -551,7 +550,7 @@ def update_customer(
             customer.approved_for_terms_by = None
 
     customer.updated_by = admin_id
-    db.commit()
+    commit_customer(db)
     db.refresh(customer)
 
     stats = _get_customer_stats(db, customer_id)
